@@ -321,19 +321,16 @@ function floorBase(ctx, F, stops) {
   if (F.gy >= F.h + PAD) return;
   fillGrad(ctx, stops, -PAD, F.gy, F.w + 2 * PAD, 240 * F.z, F.h + PAD);
 }
-// Non-perspective texture overlay on the floor (grain/noise detail; drawn
-// unsmoothed since it is noise and this keeps it cheap while zooming).
+// Non-perspective texture overlay on the floor (grain, cracks, noise). It scrolls
+// with the floor but keeps its scale, so it is blitted 1:1 (cheap) at any zoom.
 function floorTexture(ctx, F, t, alpha = 1, op = 'source-over') {
-  if (!t || F.gy >= F.h) return;
-  const fz = F.z * (1 + Math.min(F.rMax, 240) / (2 * FLOOR_H));
+  if (!t || F.gy >= F.h + PAD) return;
+  const ox = F.cx - F.camX * F.z;
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.globalCompositeOperation = op;
-  ctx.translate(F.cx, F.gy);
-  ctx.scale(fz, F.z);
-  ctx.translate(-F.camX, 0);
-  const b = { x0: F.camX - (F.cx + PAD) / fz, x1: F.camX + (F.cx + PAD) / fz };
-  drawTile(ctx, b, t, 0, 0, null, false);
+  ctx.translate(ox, F.gy);
+  drawTile(ctx, { x0: -ox - PAD, x1: F.w - ox + PAD }, t, 0);
   ctx.restore();
 }
 // Stroke floor lines of constant u (converging) every `step` units, offset `off`.
@@ -1892,6 +1889,13 @@ IMPL.rooftop = {
 // 3. Caldera Forge
 // ═════════════════════════════════════════════════════════════════════════
 
+const VOLC_P = 0.06, VOLC_X = 300, VOLC_TOP = -470;
+function volcStreams(g, vx, top) {
+  g.beginPath();
+  g.moveTo(vx - 40, top + 12); g.quadraticCurveTo(vx - 90, -330, vx - 160, -230); g.quadraticCurveTo(vx - 210, -150, vx - 250, -90);
+  g.moveTo(vx + 30, top + 12); g.quadraticCurveTo(vx + 70, -360, vx + 120, -280); g.quadraticCurveTo(vx + 170, -190, vx + 230, -130);
+  g.moveTo(vx - 5, top + 14); g.quadraticCurveTo(vx + 10, -380, vx - 20, -320);
+}
 const VOLC_SKY = [[0, '#0a0405'], [0.35, '#1e0808'], [0.6, '#3d0f0a'], [0.8, '#76210e'], [0.92, '#b33e1a'], [1, '#de6428']];
 
 // Cluster of hexagonal basalt columns, lit from below by lava.
@@ -1939,7 +1943,7 @@ IMPL.volcano = {
   build(S) {
     const R = S.rng, res = S.res;
     // Smoke banks: unions of puffs filled with one vertical gradient (lit from below)
-    S.smoke = makeTile(2400, 460, S.softRes, (g, w) => {
+    const smoke = makeTile(2400, 460, S.softRes, (g, w) => {
       for (let i = 0; i < 16; i++) {
         const cx = R() * w, cy = R.range(90, 360), span = R.range(260, 760);
         const lit = cy / 460;
@@ -1956,6 +1960,32 @@ IMPL.volcano = {
         }
         g.fill();
       }
+    });
+    // Static panorama: sky, horizon glow, smoke banks, the volcano cone and its lava streams
+    S.pano = makePano(S, VOLC_SKY, VOLC_P, (g, w, top, bot) => {
+      g.globalCompositeOperation = 'lighter';
+      drawGlowE(g, '255,90,30', 320, -60, 1500, 360, 0.34, 2);
+      g.globalCompositeOperation = 'source-over';
+      g.globalAlpha = 1;
+      panoTile(g, smoke, -800, w, bot);
+      const vx = VOLC_X, top2 = VOLC_TOP;
+      g.fillStyle = lin(g, 0, top2, 0, 0, [[0, '#251010'], [0.5, '#1d0b0a'], [1, '#4a160c']]);
+      g.beginPath();
+      g.moveTo(vx - 900, 0);
+      g.quadraticCurveTo(vx - 420, -120, vx - 140, -380);
+      g.lineTo(vx - 70, top2 + 4); g.lineTo(vx - 30, top2 + 14); g.lineTo(vx + 20, top2 + 10); g.lineTo(vx + 70, top2);
+      g.lineTo(vx + 150, -370);
+      g.quadraticCurveTo(vx + 440, -110, vx + 950, 0);
+      g.fill();
+      g.globalCompositeOperation = 'lighter';
+      g.lineCap = 'round';
+      for (const [lw, col] of [[9, 'rgba(255,80,20,0.22)'], [2.4, 'rgba(255,190,90,0.75)']]) {
+        g.strokeStyle = col;
+        g.lineWidth = lw;
+        volcStreams(g, vx, top2);
+        g.stroke();
+      }
+      g.globalCompositeOperation = 'source-over';
     });
     S.ridge = makeTile(2400, 320, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[7, 55], [19, 25], [53, 10], [140, 4]]);
@@ -1983,6 +2013,16 @@ IMPL.volcano = {
         return v;
       };
       S.cliffHt = ht;
+      // glow around the two lava falls (baked; the falls themselves are drawn live)
+      for (const i of [1, 5]) {
+        const [sx, , sw] = spires[i];
+        const fx = sx + sw * 0.22, fy = -ht(fx) * 0.92;
+        wrap(w, fx, (xx) => {
+          drawGlowE(g, '255,90,25', xx, h + fy * 0.45, 70, -fy * 0.65, 0.4, 1);
+          drawGlowE(g, '255,120,40', xx, h - 6, 90, 26, 0.5, 1);
+        });
+        g.globalAlpha = 1;
+      }
       g.beginPath();
       g.moveTo(-8, h);
       for (let x = -8; x <= w + 8; x += 3) g.lineTo(x, h - ht(x));
@@ -2017,7 +2057,7 @@ IMPL.volcano = {
         });
       }
     });
-    S.rock = makeTile(1400, 250, S.softRes, (g, w, h) => {
+    S.rock = makeTile(1400, 250, res, (g, w, h) => {
       for (let i = 0; i < 900; i++) {
         const x = R() * w, y = R() * h, s = R.range(2, 10);
         g.fillStyle = R() < 0.6 ? `rgba(0,0,0,${R.range(0.15, 0.4)})` : `rgba(140,70,50,${R.range(0.05, 0.12)})`;
@@ -2048,10 +2088,29 @@ IMPL.volcano = {
       }
       S.cracks[i % 3].push(pts);
     }
+    S.crackTex = [0, 1].map((gi) => makeTile(2000, 260, res, (g, w) => {
+      g.lineCap = 'round';
+      g.lineJoin = 'round';
+      const groups = gi === 0 ? [S.cracks[0], S.cracks[2]] : [S.cracks[1]];
+      for (const [lw, col] of [[11, 'rgba(255,70,15,0.16)'], [4, 'rgba(255,110,30,0.4)'], [1.5, 'rgba(255,215,130,0.95)']]) {
+        g.strokeStyle = col;
+        g.lineWidth = lw;
+        g.beginPath();
+        for (const grp of groups) {
+          for (const pts of grp) {
+            wrap(w, 0, (o) => {
+              g.moveTo(pts[0] + o, pts[1]);
+              for (let i = 2; i < pts.length; i += 2) g.lineTo(pts[i] + o, pts[i + 1]);
+            });
+          }
+        }
+        g.stroke();
+      }
+    }));
     S.embers = makeField(S.frng, S.n(80), (p, r) => { p.d = r.range(0.3, 0.9); p.s = r.range(2, 4.5) * (0.6 + p.d); p.vx = r.range(-10, 20); p.vy = -r.range(40, 100); p.tw = r.range(3, 8); });
     S.embersF = makeField(S.frng, S.n(16), (p, r) => { p.d = r.range(1.2, 1.5); p.s = r.range(5, 9); p.vx = r.range(-10, 30); p.vy = -r.range(80, 150); p.tw = r.range(3, 8); });
     S.ash = makeField(S.frng, S.n(40), (p, r) => { p.d = r.range(0.4, 1); p.s = r.range(1, 2.2); p.vx = r.range(10, 30); p.vy = r.range(15, 35); });
-    S.shimmer = Array.from({ length: S.hi ? 7 : 3 }, () => ({ x: S.frng.range(-900, 900), y: S.frng.range(-300, 0), s: S.frng.range(140, 260), sp: S.frng.range(18, 35) }));
+    S.shimmer = Array.from({ length: 4 }, () => ({ x: S.frng.range(-900, 900), y: S.frng.range(-300, 0), s: S.frng.range(140, 260), sp: S.frng.range(18, 35) }));
     const rock = (w, h) => makeSprite(w, h, w / 2, h, res, (g) => {
       const pts = [[-w / 2, 0]];
       for (let i = 1; i < 8; i++) pts.push([-w / 2 + (i / 8) * w + R.range(-8, 8), -h * Math.sin((i / 8) * Math.PI) * R.range(0.55, 1)]);
@@ -2097,9 +2156,9 @@ IMPL.volcano = {
       S.eruptT = R.range(5, 9);
       S.erupt = 1;
       const n = S.hi ? 22 : 11;
-      for (let i = 0; i < n; i++) vp.push({ k: 0, x: 320 + R.range(-30, 30), y: -470, vx: R.range(-170, 170), vy: -R.range(220, 460), life: R.range(1.6, 2.6), m: 0 });
+      for (let i = 0; i < n; i++) vp.push({ k: 0, x: VOLC_X + R.range(-30, 30), y: VOLC_TOP, vx: R.range(-170, 170), vy: -R.range(220, 460), life: R.range(1.6, 2.6), m: 0 });
     }
-    if (R() < dt * (S.hi ? 7 : 3.5)) vp.push({ k: 1, x: 320 + R.range(-30, 30), y: -480, vx: R.range(5, 25), vy: -R.range(25, 45), life: R.range(5, 8), m: 0, s: R.range(30, 50) });
+    if (R() < dt * (S.hi ? 7 : 3.5)) vp.push({ k: 1, x: VOLC_X + R.range(-30, 30), y: VOLC_TOP - 10, vx: R.range(5, 25), vy: -R.range(25, 45), life: R.range(5, 8), m: 0, s: R.range(30, 50) });
     for (let i = vp.length - 1; i >= 0; i--) {
       const p = vp[i];
       p.life -= dt;
@@ -2114,45 +2173,23 @@ IMPL.volcano = {
 
   back(ctx, S, cam, view) {
     const t = S.t;
-    drawSky(ctx, cam, view, VOLC_SKY, -780, 0);
-    let b = layer(ctx, cam, view, 0.04);
-    ctx.globalCompositeOperation = 'lighter';
-    drawGlowE(ctx, '255,90,30', 320, -60, 1500, 360, 0.3 + 0.1 * S.erupt, 2);
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
-    ctx.restore();
-    b = layer(ctx, cam, view, 0.05);
-    drawTile(ctx, b, S.smoke, -800, t * 4);
-    ctx.restore();
-
-    // Distant volcano (live vector) with plume, lava streams and bombs
-    b = layer(ctx, cam, view, 0.08);
-    const vx = 320, top = -470;
+    drawPano(ctx, cam, view, S.pano);
+    // live volcano details on top of the panorama: plume, crater pulse, bombs
+    let b = layer(ctx, cam, view, VOLC_P);
+    const vx = VOLC_X, top = VOLC_TOP;
     for (const p of S.vparts) {
       if (p.k !== 1) continue;
       const a = Math.min(1, p.m * 0.8) * Math.min(1, p.life * 0.4) * 0.7;
       drawGlow(ctx, '40,16,14', p.x, p.y, p.s, a, 1);
     }
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = lin(ctx, 0, top, 0, 0, [[0, '#251010'], [0.5, '#1d0b0a'], [1, '#4a160c']]);
-    ctx.beginPath();
-    ctx.moveTo(vx - 900, 0);
-    ctx.quadraticCurveTo(vx - 420, -120, vx - 140, -380);
-    ctx.lineTo(vx - 70, top + 4); ctx.lineTo(vx - 30, top + 14); ctx.lineTo(vx + 20, top + 10); ctx.lineTo(vx + 70, top);
-    ctx.lineTo(vx + 150, -370);
-    ctx.quadraticCurveTo(vx + 440, -110, vx + 950, 0);
-    ctx.fill();
     ctx.globalCompositeOperation = 'lighter';
     const pulse = 0.75 + 0.25 * Math.sin(t * 2.2) + S.erupt * 0.6;
-    drawGlowE(ctx, '255,120,40', vx, top + 6, 150, 60, 0.6 * pulse);
-    ctx.lineCap = 'round';
-    for (const [lw, col] of [[7, `rgba(255,80,20,${0.3 * pulse})`], [2.2, `rgba(255,190,90,${0.8 * pulse})`]]) {
-      ctx.strokeStyle = col;
-      ctx.lineWidth = lw;
-      ctx.beginPath();
-      ctx.moveTo(vx - 40, top + 12); ctx.quadraticCurveTo(vx - 90, -330, vx - 160, -230); ctx.quadraticCurveTo(vx - 210, -150, vx - 250, -90);
-      ctx.moveTo(vx + 30, top + 12); ctx.quadraticCurveTo(vx + 70, -360, vx + 120, -280); ctx.quadraticCurveTo(vx + 170, -190, vx + 230, -130);
-      ctx.moveTo(vx - 5, top + 14); ctx.quadraticCurveTo(vx + 10, -380, vx - 20, -320);
+    drawGlowE(ctx, '255,120,40', vx, top + 6, 120, 50, 0.6 * pulse);
+    if (S.hi) {
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = `rgba(255,200,110,${0.35 * (pulse - 0.5)})`;
+      ctx.lineWidth = 2;
+      volcStreams(ctx, vx, top);
       ctx.stroke();
     }
     for (const p of S.vparts) {
@@ -2160,7 +2197,7 @@ IMPL.volcano = {
       drawGlow(ctx, '255,140,50', p.x, p.y, 16, Math.min(1, p.life), 0);
       drawGlow(ctx, '255,230,160', p.x, p.y, 5, Math.min(1, p.life), 0);
     }
-    if (S.erupt > 0) drawGlow(ctx, '255,170,80', vx, top, 260 * S.erupt + 60, S.erupt * 0.8);
+    if (S.erupt > 0) drawGlow(ctx, '255,170,80', vx, top, 200 * S.erupt + 50, S.erupt * 0.8);
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     ctx.restore();
@@ -2174,8 +2211,6 @@ IMPL.volcano = {
     ctx.globalCompositeOperation = 'lighter';
     for (const [fx, fy] of S.falls) {
       eachCopy(fx, 2400, b.x0, b.x1, 120, (x) => {
-        drawGlowE(ctx, '255,90,25', x, fy * 0.45, 70, -fy * 0.65, 0.4, 1);
-        drawGlowE(ctx, '255,120,40', x, -6, 90, 26, 0.5, 1);
         ctx.fillStyle = lin(ctx, 0, fy, 0, 0, [[0, 'rgba(255,210,110,0.95)'], [0.5, 'rgba(255,130,40,0.85)'], [1, 'rgba(230,70,20,0.8)']]);
         ctx.beginPath();
         ctx.moveTo(x - 4, fy);
@@ -2197,16 +2232,16 @@ IMPL.volcano = {
     b = layer(ctx, cam, view, 0.42);
     const w0 = b.x0 - 4, ww = b.x1 - b.x0 + 8;
     ctx.globalCompositeOperation = 'lighter';
-    drawGlowE(ctx, '255,100,30', cam.x * 0.42, -20, ww * 0.8, 90, 0.4 + 0.08 * Math.sin(t * 1.7), 2);
-    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 0.85 + 0.15 * Math.sin(t * 1.7);
+    fillGrad(ctx, [[0, 'rgba(255,100,30,0)'], [1, 'rgba(255,100,30,0.38)']], w0, -120, ww, 86);
     ctx.globalAlpha = 1;
-    ctx.fillStyle = lin(ctx, 0, -34, 0, 0, [[0, '#9a2a0c'], [0.3, '#f07a26'], [0.55, '#ffc35c'], [0.8, '#f08a30'], [1, '#b8380f']]);
-    ctx.fillRect(w0, -34, ww, 36);
+    ctx.globalCompositeOperation = 'source-over';
+    fillGrad(ctx, [[0, '#9a2a0c'], [0.3, '#f07a26'], [0.55, '#ffc35c'], [0.8, '#f08a30'], [1, '#b8380f']], w0, -34, ww, 36);
     ctx.save();
     ctx.translate(0, -36);
     drawTile(ctx, { x0: b.x0, x1: b.x1 }, S.crust, 0, t * 26);
     ctx.globalAlpha = 0.5;
-    drawTile(ctx, { x0: b.x0, x1: b.x1 }, S.crust, 2, -t * 14 + 400);
+    if (S.hi) drawTile(ctx, { x0: b.x0, x1: b.x1 }, S.crust, 2, -t * 14 + 400);
     ctx.restore();
     ctx.globalAlpha = 1;
     ctx.fillStyle = '#1a0907';
@@ -2220,7 +2255,7 @@ IMPL.volcano = {
     // Heat shimmer bands + embers + ash behind the fighters
     b = layer(ctx, cam, view, 0.9);
     ctx.globalCompositeOperation = 'lighter';
-    for (const h of S.shimmer) {
+    for (const h of S.hi ? S.shimmer : []) {
       eachCopy(h.x, 2400, b.x0, b.x1, h.s, (x) => drawGlowE(ctx, '255,110,40', x + Math.sin(t * 1.3 + h.s) * 30, h.y, h.s * 1.8, h.s * 0.25, 0.06, 2));
     }
     ctx.globalCompositeOperation = 'source-over';
@@ -2233,24 +2268,12 @@ IMPL.volcano = {
     const F = floorView(cam, view);
     if (F.gy < view.h) {
       floorBase(ctx, F, [[0, '#4a2014'], [0.1, '#2a120c'], [0.5, '#170a07'], [1, '#0a0504']]);
-      floorTexture(ctx, F, S.rock, 1);
+      if (S.hi) floorTexture(ctx, F, S.rock, 1);
       ctx.globalCompositeOperation = 'lighter';
-      drawGlowE(ctx, '255,110,40', view.w / 2, F.gy, view.w * 0.75, 40 * F.z, 0.32, 2);
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      for (let gi = 0; gi < 3; gi++) {
-        const pulse = clamp(0.55 + 0.45 * Math.sin(t * 1.6 + gi * 2.1) + S.flare * 0.8, 0, 1.6);
-        ctx.beginPath();
-        floorCopies(F, 2000, 0, 2200, (du) => { for (const pts of S.cracks[gi]) if (pts[1] < F.rMax + 20) floorLine(ctx, F, pts, du); });
-        ctx.strokeStyle = `rgba(255,70,15,${0.16 * pulse})`;
-        ctx.lineWidth = 12 * F.z;
-        ctx.stroke();
-        ctx.strokeStyle = `rgba(255,110,30,${0.35 * pulse})`;
-        ctx.lineWidth = 4 * F.z;
-        ctx.stroke();
-        ctx.strokeStyle = `rgba(255,210,120,${Math.min(1, 0.8 * pulse)})`;
-        ctx.lineWidth = 1.4 * F.z;
-        ctx.stroke();
+      fillGrad(ctx, [[0, 'rgba(255,110,40,0.3)'], [1, 'rgba(255,110,40,0)']], -PAD, F.gy, view.w + 2 * PAD, 34 * F.z);
+      for (let gi = 0; gi < (S.hi ? 2 : 1); gi++) {
+        const pulse = clamp(0.6 + 0.4 * Math.sin(t * 1.6 + gi * 2.6) + S.flare * 0.7, 0, 1);
+        floorTexture(ctx, F, S.crackTex[gi], pulse, 'lighter');
       }
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
@@ -2455,7 +2478,7 @@ IMPL.glacier = {
         }),
       });
     }
-    S.ice = makeTile(1600, 250, S.softRes, (g, w, h) => {
+    S.ice = makeTile(1600, 250, res, (g, w, h) => {
       for (let i = 0; i < 26; i++) {
         let x = R() * w, y = R() * h;
         g.strokeStyle = `rgba(235,248,255,${R.range(0.15, 0.4)})`;
@@ -2815,7 +2838,7 @@ IMPL.bamboo = {
         u += wdt;
       }
     }
-    S.moss = makeTile(1400, 260, S.softRes, (g, w, h) => {
+    S.moss = makeTile(1400, 260, res, (g, w, h) => {
       for (let i = 0; i < 140; i++) {
         const x = R() * w, y = R() * h, rw = R.range(10, 50);
         wrap(w, x, (xx) => {
@@ -3122,7 +3145,7 @@ IMPL.temple = {
       g.fillStyle = lin(g, 0, h - 12, 0, h, [[0, '#efe4d6'], [1, '#bfae9c']]);
       g.fillRect(-8, h - 12, w + 16, 12);
     });
-    S.veins = makeTile(1500, 250, S.softRes, (g, w, h) => {
+    S.veins = makeTile(1500, 250, res, (g, w, h) => {
       for (let i = 0; i < 40; i++) {
         let x = R() * w, y = R() * h;
         g.strokeStyle = `rgba(120,100,110,${R.range(0.06, 0.16)})`;
@@ -3588,7 +3611,7 @@ IMPL.necropolis = {
       }
     });
     S.fog = fogTile(R, 2400, 220, S.softRes, '160,200,190');
-    S.flag = makeTile(1600, 260, S.softRes, (g, w, h) => {
+    S.flag = makeTile(1600, 260, res, (g, w, h) => {
       for (let i = 0; i < 70; i++) {
         const x = R() * w, y = R() * h, rw = R.range(20, 70);
         wrap(w, x, (xx) => {
@@ -3917,7 +3940,7 @@ IMPL.foundry = {
     S.sparks = [];
     S.sparkT = 1;
     S.chains = [-760, -330, 420, 880].map((x) => ({ x, hang: R.range(330, 450), ang: 0, av: 0, ph: R() * TAU }));
-    S.grime = makeTile(1400, 260, S.softRes, (g, w, h) => {
+    S.grime = makeTile(1400, 260, res, (g, w, h) => {
       for (let i = 0; i < 120; i++) {
         const x = R() * w, y = R() * h, rw = R.range(14, 60);
         wrap(w, x, (xx) => {
