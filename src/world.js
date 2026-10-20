@@ -752,7 +752,7 @@ export class World {
       case 'seek':
         // aim velocity at the opponent's current x
         if (opp) {
-          const dx = opp.x - f.x;
+          const dx = opp.x - f.x - Math.sign(opp.x - f.x) * (p.short ?? 30);
           f.facing = dx >= 0 ? 1 : -1;
           f.vx = clamp(dx / (p.frames || 30), -(p.max || 12), p.max || 12);
           if (p.vy != null) {

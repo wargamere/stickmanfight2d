@@ -778,6 +778,7 @@ export function createScenes(game) {
       const ws = winnerSide ?? result.winner;
       const wf = match.f[Math.max(0, ws)];
       this.preview = new FighterPreview(wf.def.id, { mode: 'victory', facing: 1 });
+      this.quote = wf.def.quotes ? pick(wf.def.quotes) : '';
       this.preview.setSkin(wf.def.skins.indexOf(wf.skin), wf.acc.hat);
       this.menu = new ListMenu(items, { x: 60, y: 0, w: 380, h: 50, size: 22 });
       this.humanSide = humanSide;
@@ -800,6 +801,7 @@ export function createScenes(game) {
       const won = this.headline.win;
       text(ctx, this.headline.text, 60, 82, { size: 92, font: FONT_BIG, align: 'left', color: won ? C.accent : '#ff5c5c', stroke: '#000', sw: 9, shadow: 'rgba(0,0,0,0.5)' });
       if (this.sub) text(ctx, this.sub, 64, 140, { size: 22, font: FONT_UI, align: 'left', color: '#fff' });
+      if (this.quote) wrapText(ctx, `“${this.quote}”`, 64, 172, Math.min(440, view.w * 0.34), 26, { size: 21, color: C.dim });
       const sx = view.w * 0.52, sy = view.h * 0.74;
       const spot = ctx.createRadialGradient(sx, sy - 120, 10, sx, sy - 120, 300);
       spot.addColorStop(0, rgba(readable(this.preview.f.skin.accent), 0.28));

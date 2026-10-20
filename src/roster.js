@@ -50,7 +50,7 @@ function barrage(c, t, t0, t1, every, poses, hitOpts, extra) {
 // 1. KAI — The Wanderer
 // ---------------------------------------------------------------------------
 const KAI = {
-  id: 'kai', name: 'KAI', title: 'The Wanderer',
+  id: 'kai', name: 'KAI', quotes: ['The road is long. You were a short stop on it.', 'Breathe in. Strike. Breathe out. Done.', 'Train harder. I\'ll still be walking.'], title: 'The Wanderer',
   bio: 'A drifting martial artist who channels raw spirit through open palms. Balanced, honest, deadly.',
   set: 'fist', accessories: ['headband'],
   stats: { hp: 1000, power: 1, speed: 1, defense: 1, weight: 1, jump: 1 },
@@ -132,7 +132,7 @@ function castAir() {
 // 2. ROSA — Crimson Blade
 // ---------------------------------------------------------------------------
 const ROSA = {
-  id: 'rosa', name: 'ROSA', title: 'Crimson Blade',
+  id: 'rosa', name: 'ROSA', quotes: ['One cut was enough. I made it count.', 'Patience is the sharpest blade.', 'You blinked. That was your mistake.'], title: 'Crimson Blade',
   bio: 'A duelist whose katana moves faster than rumor. Patient, precise, and lethal on the counter.',
   set: 'armed', accessories: ['ponytail'],
   weapon: { kind: 'katana', len: 74, metal: '#eef3f8', guard: '#d4a72c', handle: '#1d1d24' },
@@ -227,7 +227,7 @@ const ROSA = {
 // 3. NYX — Night Fang
 // ---------------------------------------------------------------------------
 const NYX = {
-  id: 'nyx', name: 'NYX', title: 'Night Fang',
+  id: 'nyx', name: 'NYX', quotes: ['You never saw me. Nobody does.', 'Shadows don\'t lose.', 'Check behind you next time.'], title: 'Night Fang',
   bio: 'A shadow assassin with twin fangs and no reflection. Here, then behind you, then gone.',
   set: 'armed', accessories: ['scarf'],
   weapon: { kind: 'dagger', len: 34, dual: true, metal: '#d7dde6', handle: '#2a1b3d', guard: '#7b5cff' },
@@ -312,7 +312,7 @@ const NYX = {
 // 4. BRUTUS — The Mountain
 // ---------------------------------------------------------------------------
 const BRUTUS = {
-  id: 'brutus', name: 'BRUTUS', title: 'The Mountain',
+  id: 'brutus', name: 'BRUTUS', quotes: ['Mountains don\'t move. You do.', 'That was me holding back.', 'Get up. Oh. You can\'t.'], title: 'The Mountain',
   bio: 'A walking landslide with a hammer forged from a fallen star. Slow to start, impossible to stop.',
   set: 'heavy', accessories: ['beard'], scale: 1.16, lineW: 8,
   weapon: { kind: 'hammer', len: 64, grip: 20, metal: '#8f98a3', handle: '#6b4a2b' },
@@ -412,7 +412,7 @@ const BRUTUS = {
 // 5. VOLT — Storm Runner
 // ---------------------------------------------------------------------------
 const VOLT = {
-  id: 'volt', name: 'VOLT', title: 'Storm Runner',
+  id: 'volt', name: 'VOLT', quotes: ['Too slow! Way, way too slow.', 'Lightning struck twice. Both times was me.', 'Blink and you miss it. You blinked.'], title: 'Storm Runner',
   bio: 'Struck by lightning seven times, he now strikes back. Blindingly fast, dangerously fragile.',
   set: 'fist', accessories: ['spiky'], scale: 0.96, tempo: 0.88,
   weapon: { kind: 'gauntlet' },
@@ -497,7 +497,7 @@ const VOLT = {
 // 6. YUKI — Frost Lotus
 // ---------------------------------------------------------------------------
 const YUKI = {
-  id: 'yuki', name: 'YUKI', title: 'Frost Lotus',
+  id: 'yuki', name: 'YUKI', quotes: ['Winter always wins.', 'Cool your head. Then try again.', 'The ice remembers every step you took.'], title: 'Frost Lotus',
   bio: 'A mountain priestess with a spear of living ice. Every step she takes leaves winter behind.',
   set: 'armed', accessories: ['scarf'],
   weapon: { kind: 'spear', len: 62, grip: 44, metal: '#e6fbff', handle: '#5b7a9a' },
@@ -591,7 +591,7 @@ const YUKI = {
 // 7. IGNIS — Ember Sage
 // ---------------------------------------------------------------------------
 const IGNIS = {
-  id: 'ignis', name: 'IGNIS', title: 'Ember Sage',
+  id: 'ignis', name: 'IGNIS', quotes: ['Did it get warm in here?', 'I only burn what deserves it.', 'Ashes to ashes. Yours, mostly.'], title: 'Ember Sage',
   bio: 'A pyromancer who keeps a sun in each fist. Keep your distance — he would love that.',
   set: 'fist', accessories: ['flame'],
   weapon: { kind: 'gauntlet' },
@@ -670,7 +670,7 @@ const IGNIS = {
 // 8. ZEN — Iron Monk
 // ---------------------------------------------------------------------------
 const ZEN = {
-  id: 'zen', name: 'ZEN', title: 'Iron Monk',
+  id: 'zen', name: 'ZEN', quotes: ['Anger is a heavy weapon. You carried too much.', 'Stillness beats speed.', 'Rest now. Reflect later.'], title: 'Iron Monk',
   bio: 'A temple guardian whose staff turns arrows into dust and fury into calm. Outlasts everyone.',
   set: 'armed', accessories: ['beads'],
   weapon: { kind: 'staff', len: 74, grip: 46, handle: '#8a5a2b' },
@@ -694,10 +694,9 @@ const ZEN = {
     },
     S2: {
       name: 'Vaulting Kick', special: true, tag: 'rush', range: [100, 500], dur: 50, stam: 15, until: 'land', landLag: 10,
-      keys: [[0, 'crouch'], [6, 'jumpTuck', 'snap'], [18, 'flipTuck'], [26, 'airKick'], [50, 'airKick']],
-      vel: [[6, 8.5, -15]],
-      ev: [[6, 'sfx', { name: 'jump' }]],
-      hits: [{ f: [20, 50], a: 'kneeF', b: 'footF', r: 20, dmg: 52, stun: 26, kb: [6, -6], stop: 8, sfx: 'hitHeavy', spark: 'heavy', kd: true }],
+      keys: [[0, 'crouch'], [6, 'jumpTuck', 'snap'], [16, 'flipTuck'], [22, 'airKick'], [50, 'airKick']],
+      ev: [[6, 'seek', { frames: 30, max: 11, vy: -15 }], [6, 'sfx', { name: 'jump' }]],
+      hits: [{ f: [16, 50], a: 'kneeF', b: 'footF', r: 22, dmg: 52, stun: 26, kb: [6, -6], stop: 8, sfx: 'hitHeavy', spark: 'heavy', kd: true }],
     },
     S3: {
       name: 'Meditate', special: true, tag: 'heal', dur: 70, stam: 30,
@@ -759,7 +758,7 @@ function staffSpin(rot) {
 // 9. VIPER — Chain Fang
 // ---------------------------------------------------------------------------
 const VIPER = {
-  id: 'viper', name: 'VIPER', title: 'Chain Fang',
+  id: 'viper', name: 'VIPER', quotes: ['Should\'ve kept your distance.', 'The chain always comes back.', 'Feeling a little sick? That\'s the venom.'], title: 'Chain Fang',
   bio: 'A desert mercenary with a bladed chain and a poisoned grin. Never fight her at arm\'s length.',
   set: 'armed', accessories: ['mask', 'ponytail'],
   weapon: { kind: 'chain', len: 46, extend: 2.6, metal: '#c9d1db' },
@@ -788,9 +787,9 @@ const VIPER = {
       ev: [[10, 'proj', { kind: 'kunai', spd: 20, r: 12, life: 26, color: '#c9d1db', sfx: 'chain', tether: true, hit: H({ dmg: 30, stun: 30, kb: [0, 0], pull: true, sfx: 'chain', spark: 'medium' }) }]],
     },
     S3: {
-      name: 'Venom Spit', special: true, tag: 'proj', range: [150, 650], dur: 34, stam: 13,
+      name: 'Venom Spit', special: true, tag: 'proj', range: [160, 520], dur: 34, stam: 13,
       keys: [[0, 'armed'], [6, 'castWind'], [12, 'pointFwd', 'snap'], [24, 'pointFwd'], [34, 'armed']],
-      ev: [[12, 'proj', { kind: 'venom', from: 'head', spd: 10, vy: -8, grav: 0.38, r: 13, life: 120, color: '#9dff5c', sfx: 'poison', hit: H({ dmg: 28, stun: 20, kb: [3, -2], elem: 'poison', status: { poison: 320 }, sfx: 'poison', spark: 'light' }) }]],
+      ev: [[12, 'proj', { kind: 'venom', from: 'head', spd: 10, vy: -4.5, grav: 0.3, r: 14, life: 120, color: '#9dff5c', sfx: 'poison', hit: H({ dmg: 28, stun: 20, kb: [3, -2], elem: 'poison', status: { poison: 320 }, sfx: 'poison', spark: 'light' }) }]],
     },
     SA: {
       name: 'Sky Lash', special: true, tag: 'poke', air: true, dur: 30, stam: 11, trail: true,
@@ -856,7 +855,7 @@ function lashAir() {
 // 10. MORTIS — The Harvester
 // ---------------------------------------------------------------------------
 const MORTIS = {
-  id: 'mortis', name: 'MORTIS', title: 'The Harvester',
+  id: 'mortis', name: 'MORTIS', quotes: ['Your stamina tasted wonderful.', 'Every cut made me stronger.', 'I\'ll see you again. Everyone does.'], title: 'The Harvester',
   bio: 'A restless spirit bound to a scythe that feeds on stamina and souls alike. Every cut makes him stronger.',
   set: 'armed', accessories: ['hood'],
   weapon: { kind: 'scythe', len: 84, grip: 26, metal: '#d9fff5', handle: '#3a3a44' },
@@ -953,7 +952,7 @@ function scytheSpin(rot) {
 // 11. UNIT-7 — Steel Ronin
 // ---------------------------------------------------------------------------
 const UNIT7 = {
-  id: 'unit7', name: 'UNIT-7', title: 'Steel Ronin',
+  id: 'unit7', name: 'UNIT-7', quotes: ['Target neutralized. Honor preserved.', 'Calculation complete: you lose.', 'Recharging. You may leave now.'], title: 'Steel Ronin',
   bio: 'A decommissioned war machine that learned honor from old samurai films. Mines, rockets, zero mercy.',
   set: 'fist', accessories: ['visor'], eyeShape: 'visor',
   weapon: { kind: 'cannon', metal: '#aab4c0' },
@@ -1036,7 +1035,7 @@ const UNIT7 = {
 // 12. OMEGA — The Void (final boss)
 // ---------------------------------------------------------------------------
 const OMEGA = {
-  id: 'omega', name: 'OMEGA', title: 'The Void',
+  id: 'omega', name: 'OMEGA', quotes: ['...', 'There is no top of the tower. Only me.', 'Unmade.'], title: 'The Void',
   bio: 'The thing at the top of the last tower. It does not speak. It does not stop. It only unmakes.',
   set: 'fist', accessories: ['horns'], scale: 1.22, lineW: 8,
   weapon: { kind: 'claw' },
