@@ -15,6 +15,8 @@ export const MODS = {
   mirror: { name: 'Mirror Match', desc: 'Face your own reflection.', color: '#ffffff', apply: (m) => m },
 };
 
+import { makeRng } from './util.js';
+
 export function buildMods(list = []) {
   let m = {};
   for (const id of list) if (MODS[id]) m = MODS[id].apply(m);
@@ -125,3 +127,36 @@ export const MOVE_LIST_COMMON = [
   ['Ultimate', 'ULT with a full power bar — or cancel a hit into it'],
   ['Movement', 'Double-tap or DASH key to dash, double jump, air dash, wall jump'],
 ];
+
+// ---------------------------------------------------------------------------
+// Daily challenge: the same opponent, stage and modifiers for everyone on a
+// given calendar day (local time).
+// ---------------------------------------------------------------------------
+const DAILY_MODS = ['lowgrav', 'glass', 'turbo', 'meter', 'regen', 'giant', 'armored', 'poison', 'frail', 'sudden'];
+const DAILY_FIGHTERS = ['kai', 'rosa', 'nyx', 'brutus', 'volt', 'yuki', 'ignis', 'zen', 'viper', 'mortis', 'unit7', 'omega'];
+const DAILY_ARENAS = ['dojo', 'rooftop', 'volcano', 'glacier', 'bamboo', 'temple', 'necropolis', 'foundry', 'void'];
+
+const dayKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+export function dailyChallenge(date = new Date()) {
+  const key = dayKey(date);
+  const prev = new Date(date);
+  prev.setDate(prev.getDate() - 1);
+  let seed = 0;
+  for (const ch of key) seed = (seed * 31 + ch.charCodeAt(0)) | 0;
+  const rng = makeRng(seed);
+  const pool = DAILY_MODS.slice();
+  const mods = [];
+  while (mods.length < 2) mods.push(pool.splice(Math.floor(rng() * pool.length), 1)[0]);
+  if (mods.includes('sudden') && mods.includes('poison')) mods[1] = 'meter';
+  return {
+    key,
+    yesterday: dayKey(prev),
+    opp: rng.pick(DAILY_FIGHTERS),
+    arena: rng.pick(DAILY_ARENAS),
+    skin: rng.int(0, 3),
+    mods,
+    lvl: 2.6 + rng() * 0.9,
+    rounds: 2,
+  };
+}

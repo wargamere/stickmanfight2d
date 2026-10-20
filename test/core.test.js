@@ -188,3 +188,19 @@ test('arenas expose the agreed API', () => {
     assert.ok(a.id && a.name && a.music);
   }
 });
+
+test('daily challenge is deterministic per day and valid', async () => {
+  const { dailyChallenge, MODS: M } = await import('../src/modes.js');
+  const a = dailyChallenge(new Date(2026, 9, 20)), b = dailyChallenge(new Date(2026, 9, 20, 23, 59));
+  assert.deepEqual(a, b);
+  assert.equal(a.key, '2026-10-20');
+  assert.equal(a.yesterday, '2026-10-19');
+  assert.notDeepEqual(dailyChallenge(new Date(2026, 9, 21)).key, a.key);
+  for (let d = 1; d < 60; d++) {
+    const c = dailyChallenge(new Date(2026, 0, d));
+    assert.equal(new Set(c.mods).size, 2);
+    for (const m of c.mods) assert.ok(M[m]);
+    assert.ok(FIGHTER_DEFS.some((f) => f.id === c.opp));
+    assert.ok(ARENAS.some((x) => x.id === c.arena));
+  }
+});

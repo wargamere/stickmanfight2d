@@ -332,22 +332,22 @@ export class Toasts {
     this.list = this.list.filter((t) => t.t < t.life);
   }
   draw(ctx, view) {
-    // stack upward from the bottom centre (clear of HUD bars and side panels)
-    let y = view.h - 150;
-    for (let i = this.list.length - 1; i >= 0; i--) {
+    // stack downward from the top centre (titles sit left, coins right, timer above)
+    let y = 96;
+    for (let i = 0; i < this.list.length; i++) {
       const t = this.list[i];
       const k = t.t < 16 ? ease.back(t.t / 16) : t.t > t.life - 20 ? 1 - (t.t - (t.life - 20)) / 20 : 1;
       const w = 380, h = 70;
       const x = view.w / 2 - w / 2;
       ctx.save();
       ctx.globalAlpha = clamp(k, 0, 1);
-      ctx.translate(0, (1 - clamp(k, 0, 1)) * 40);
+      ctx.translate(0, -(1 - clamp(k, 0, 1)) * 40);
       panel(ctx, x, y, w, h, { fill: 'rgba(12,10,24,0.94)', stroke: t.color, r: 12 });
       text(ctx, t.icon, x + 36, y + h / 2 + 2, { size: 30, color: t.color, font: FONT_BIG });
       text(ctx, t.title, x + 66, y + 24, { size: 18, align: 'left', color: t.color, font: FONT_UI });
       text(ctx, t.body, x + 66, y + 48, { size: 16, align: 'left', color: '#fff', font: FONT_BODY });
       ctx.restore();
-      y -= h + 10;
+      y += h + 10;
     }
   }
 }

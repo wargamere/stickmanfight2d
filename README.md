@@ -35,6 +35,7 @@ npm run build        # → dist/index.html
 | **Quick Fight** | Any matchup, any stage, five CPU difficulties from Rookie to Nightmare |
 | **Versus** | Two players on one keyboard, or one gamepad each |
 | **Survival** | Endless waves where your health carries over, with a boss every 5 waves |
+| **Daily Challenge** | A new opponent, stage and modifier pair every day, with bonus coins for keeping a streak |
 | **Training** | Dummy modes (stand / block / random / jump / air recover / CPU), hitbox view, infinite power, auto refill |
 | **Progression** | Coins, a Locker with fighters, skins and 11 hats, 26 achievements, lifetime stats, all saved locally |
 | **10 animated stages** | Parallax backgrounds with weather, lighting and props that react to big hits |

@@ -21,6 +21,7 @@ export function defaultSave() {
       quality: 'high', difficulty: 2, touch: 'auto', rounds: 2, time: 99, autoPerfDone: false,
     },
     bindings: null,
+    daily: { last: '', streak: 0, best: 0 },
     lastP1: 'kai',
     lastP2: 'rosa',
     tutorialSeen: false,

@@ -1,10 +1,17 @@
 // Stickman Fight 2D — procedural arena backgrounds.
 //
 // Ten animated, parallax stage backdrops drawn entirely with the Canvas 2D API
-// (no image assets). Static / complex silhouettes are pre-rendered once into
-// offscreen canvases in createArenaState (2x for crisp near-field sprites on
-// 'high', lower for soft distant scenery) and blitted every frame; only cheap
-// animated details (particles, glows, swinging props) are drawn live.
+// (no image assets). Static / complex silhouettes are pre-rendered into
+// offscreen canvases at the *device* resolution of the target context (detected
+// on first draw, capped at 2x) and blitted every frame; only cheap animated
+// details (particles, glows, swinging props) are drawn live.
+//
+// Performance model (matters most for software-rasterised canvases):
+//  - Layers with parallax p < ZOOM_P ignore camera zoom (they still pan), so
+//    their caches are blitted 1:1 at integer device pixels: the fastest path.
+//  - Gradients over large areas come from cached 1px gradient strips stretched
+//    with drawImage; the vignette / colour grade is one cached overlay image.
+//  - Large glows are baked into caches; live glows stay small.
 //
 // Public API (see bottom of file):
 //   ARENAS, createArenaState(id, {quality, seed}), updateArena(state, dt),
@@ -23,6 +30,7 @@
 
 const TAU = Math.PI * 2;
 const FLOOR_H = 800;       // distance (floor units) from ground line to the floor's vanishing point
+const ZOOM_P = 0.5;        // layers nearer than this scale with camera zoom; farther ones only pan
 const PAD = 48;            // screen-space overdraw margin so caller-applied screen shake never reveals edges
 const FIELD_M = 90;        // margin around the screen for wrapped ambient particle fields
 const FIELD_W = 1710 + FIELD_M * 2;
@@ -130,52 +138,73 @@ function createCanvas(w, h) {
 
 // Sprite: pre-rendered image anchored at (ax, ay) in its own units.
 function makeSprite(w, h, ax, ay, res, draw) {
-  const c = createCanvas(w * res, h * res);
+  const c = createCanvas(Math.round(w * res), Math.round(h * res));
   if (!c) return null;
   const g = c.getContext('2d');
-  g.scale(c.width / w, c.height / h);
+  g.scale(res, res);
   g.translate(ax, ay);
   draw(g);
-  return { c, w, h, ax, ay };
+  return { c, w: c.width / res, h: c.height / res, ax, ay };
+}
+// Draw an image covering user rect (x, y, w, h), snapped to whole device pixels.
+// When the rect maps 1:1 onto the image's pixels it is blitted unscaled.
+function blit(ctx, c, x, y, w, h) {
+  const m = ctx.getTransform();
+  if (m.b !== 0 || m.c !== 0 || m.a <= 0 || m.d <= 0) { ctx.drawImage(c, x, y, w, h); return; }
+  const X = m.a * x + m.e, Y = m.d * y + m.f, W = m.a * w, H = m.d * h;
+  const x0 = Math.round(X), y0 = Math.round(Y);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (Math.abs(W - c.width) < 0.75 && Math.abs(H - c.height) < 0.75) ctx.drawImage(c, x0, y0);
+  else ctx.drawImage(c, x0, y0, Math.max(1, Math.round(X + W) - x0), Math.max(1, Math.round(Y + H) - y0));
+  ctx.setTransform(m);
 }
 function drawSprite(ctx, s, x, y, sc = 1) {
-  if (s) ctx.drawImage(s.c, x - s.ax * sc, y - s.ay * sc, s.w * sc, s.h * sc);
+  if (s) blit(ctx, s.c, x - s.ax * sc, y - s.ay * sc, s.w * sc, s.h * sc);
 }
 
-// Horizontally periodic tile (period w). Content drawn by `draw(g, w, h)` must
-// wrap itself (see `wrap`).
-//  - Opaque silhouettes keep a small wrapped margin and are blitted with
-//    drawImage, neighbouring copies overlapping by one unit (no seams, fast).
-//  - Translucent tiles (clouds, fog, floor detail) go through a repeat-x pattern,
-//    because overlapping translucent copies would show a double-alpha seam.
-function makeTile(w, h, res, draw, translucent = false) {
-  const m = translucent ? 0 : 4;
-  const c = createCanvas((w + 2 * m) * res, h * res);
+// Horizontally periodic tile. The canvas holds exactly one period: its width is
+// rounded to whole pixels and the period handed to `draw(g, w, h)` is adjusted
+// to match, so copies placed side by side at integer device pixels join
+// seamlessly (also for translucent content). Content must wrap itself (`wrap`).
+function makeTile(w, h, res, draw) {
+  const c = createCanvas(Math.round(w * res), Math.round(h * res));
   if (!c) return null;
   const g = c.getContext('2d');
-  g.scale(c.width / (w + 2 * m), c.height / h);
-  g.translate(m, 0);
-  draw(g, w, h);
-  return { c, w, h, m, pat: null };
+  const we = c.width / res, he = c.height / res;
+  g.scale(res, res);
+  draw(g, we, he);
+  return { c, w: we, h: he };
 }
-const makeTileT = (w, h, res, draw) => makeTile(w, h, res, draw, true);
 const wrap = (w, x, fn) => { fn(x - w); fn(x); fn(x + w); };
 
-// Repeat a tile across layer bounds b with its top at layer y; optional solid fill below it.
-function drawTile(ctx, b, t, y, scroll = 0, fill = null) {
-  if (t && t.m === 0) {
-    if (!t.pat) t.pat = ctx.createPattern(t.c, 'repeat-x');
-    if (t.pat) {
-      t.pat.setTransform({ a: t.w / t.c.width, b: 0, c: 0, d: t.h / t.c.height, e: mod(scroll, t.w), f: y });
-      ctx.fillStyle = t.pat;
-      ctx.fillRect(b.x0 - 2, y, b.x1 - b.x0 + 4, t.h);
+// Repeat a tile across layer bounds b with its top at layer y; optional solid
+// fill below it. Copies are placed in device space on whole pixels; when the
+// layer maps the cache 1:1 they are blitted unscaled.
+function drawTile(ctx, b, t, y, scroll = 0, fill = null, smooth = true) {
+  if (t) {
+    const m = ctx.getTransform();
+    const x = Math.floor((b.x0 - scroll) / t.w) * t.w + scroll;
+    if (m.b === 0 && m.c === 0 && m.a > 0 && m.d > 0) {
+      const X = m.a * x + m.e, Y = m.d * y + m.f, pw = m.a * t.w, ph = m.d * t.h;
+      const xEnd = m.a * b.x1 + m.e;
+      const exact = Math.abs(pw - t.c.width) < 0.75 && Math.abs(ph - t.c.height) < 0.75;
+      const yi = Math.round(Y);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (exact) {
+        for (let xi = Math.round(X); xi < xEnd; xi += t.c.width) ctx.drawImage(t.c, xi, yi);
+      } else {
+        const hi = Math.max(1, Math.round(Y + ph) - yi);
+        if (!smooth) ctx.imageSmoothingEnabled = false;
+        for (let k = 0; X + k * pw < xEnd && k < 64; k++) {
+          const x0 = Math.round(X + k * pw), x1 = Math.round(X + (k + 1) * pw);
+          if (x1 > x0) ctx.drawImage(t.c, x0, yi, x1 - x0, hi);
+        }
+        ctx.imageSmoothingEnabled = true;
+      }
+      ctx.setTransform(m);
+    } else {
+      for (let xx = x, k = 0; xx < b.x1 && k < 64; xx += t.w, k++) ctx.drawImage(t.c, xx, y, t.w, t.h);
     }
-  } else if (t) {
-    const ppu = t.c.width / (t.w + 2 * t.m);
-    const e = 1;
-    const sx = (t.m - e) * ppu, sw = (t.w + 2 * e) * ppu;
-    let x = Math.floor((b.x0 - scroll) / t.w) * t.w + scroll;
-    for (; x < b.x1; x += t.w) ctx.drawImage(t.c, sx, 0, sw, t.c.height, x - e, y, t.w + 2 * e, t.h);
   }
   const bottom = y + (t ? t.h : 0);
   if (fill && b.y1 > bottom - 1) {
@@ -192,9 +221,7 @@ function drawInstances(ctx, b, list, period) {
     const sc = o.sc || 1;
     const left = s.ax * sc, right = (s.w - s.ax) * sc;
     let x = o.x + Math.ceil((b.x0 - right - o.x) / period) * period;
-    for (; x - left < b.x1; x += period) {
-      ctx.drawImage(s.c, x - left, (o.y || 0) - s.ay * sc, s.w * sc, s.h * sc);
-    }
+    for (; x - left < b.x1; x += period) blit(ctx, s.c, x - left, (o.y || 0) - s.ay * sc, s.w * sc, s.h * sc);
   }
 }
 
@@ -244,8 +271,9 @@ function drawGlowE(ctx, rgb, x, y, rx, ry, a = 1, kind = 0) {
 
 // ── Transforms ───────────────────────────────────────────────────────────
 // Enter a parallax layer (caller must ctx.restore()). Returns visible bounds in layer coords.
+const layerZ = (cam, p) => (p < ZOOM_P ? 1 : 1 + (cam.zoom - 1) * p);
 function layer(ctx, cam, view, p) {
-  const z = 1 + (cam.zoom - 1) * p;
+  const z = layerZ(cam, p);
   ctx.save();
   ctx.translate(view.w / 2, view.h * 0.8);
   ctx.scale(z, z);
@@ -260,7 +288,7 @@ function layer(ctx, cam, view, p) {
 }
 // Screen position of a layer point (for reflections / glows drawn in screen space).
 function layerToScreen(cam, view, p, x, y) {
-  const z = 1 + (cam.zoom - 1) * p;
+  const z = layerZ(cam, p);
   return [view.w / 2 + (x - cam.x * p) * z, view.h * 0.8 + (y - cam.y * p) * z, z];
 }
 
@@ -291,10 +319,10 @@ const fU1 = (F, r) => F.camX + (F.cx + PAD) / (F.z * (1 + r / FLOOR_H));
 // Fill the floor band with a vertical gradient (stops are in floor depth units 0..240).
 function floorBase(ctx, F, stops) {
   if (F.gy >= F.h + PAD) return;
-  ctx.fillStyle = lin(ctx, 0, F.gy, 0, F.gy + 240 * F.z, stops);
-  ctx.fillRect(-PAD, F.gy, F.w + 2 * PAD, F.h - F.gy + PAD);
+  fillGrad(ctx, stops, -PAD, F.gy, F.w + 2 * PAD, 240 * F.z, F.h + PAD);
 }
-// Non-perspective texture overlay on the floor (for grain/noise detail).
+// Non-perspective texture overlay on the floor (grain/noise detail; drawn
+// unsmoothed since it is noise and this keeps it cheap while zooming).
 function floorTexture(ctx, F, t, alpha = 1, op = 'source-over') {
   if (!t || F.gy >= F.h) return;
   const fz = F.z * (1 + Math.min(F.rMax, 240) / (2 * FLOOR_H));
@@ -305,7 +333,7 @@ function floorTexture(ctx, F, t, alpha = 1, op = 'source-over') {
   ctx.scale(fz, F.z);
   ctx.translate(-F.camX, 0);
   const b = { x0: F.camX - (F.cx + PAD) / fz, x1: F.camX + (F.cx + PAD) / fz };
-  drawTile(ctx, b, t, 0);
+  drawTile(ctx, b, t, 0, 0, null, false);
   ctx.restore();
 }
 // Stroke floor lines of constant u (converging) every `step` units, offset `off`.
@@ -336,6 +364,32 @@ function floorCopies(F, period, uMin, uMax, fn) {
   for (; k * period + uMin < u1; k++) fn(k * period);
 }
 
+// ── Gradients as cached 1px strips ───────────────────────────────────────
+// A vertical gradient rendered once into a 1x256 canvas and stretched with
+// drawImage is several times cheaper to rasterise than a gradient fill.
+const _strips = new Map();
+function gradStrip(stops) {
+  const key = JSON.stringify(stops);
+  let c = _strips.get(key);
+  if (c !== undefined) return c;
+  c = createCanvas(1, 256);
+  if (c) {
+    const g = c.getContext('2d');
+    g.fillStyle = lin(g, 0, 0, 0, 256, stops);
+    g.fillRect(0, 0, 1, 256);
+  }
+  _strips.set(key, c);
+  return c;
+}
+// Gradient over [y, y+h]; continues with the end colours down to `bottom` (and above y if `top` given).
+function fillGrad(ctx, stops, x, y, w, h, bottom = y + h, top = y) {
+  const c = gradStrip(stops);
+  if (!c) return;
+  if (top < y) { ctx.fillStyle = stops[0][1]; ctx.fillRect(x, top, w, y - top + 1); }
+  ctx.drawImage(c, 0, 0.5, 1, 255, x, y, w, h);
+  if (bottom > y + h) { ctx.fillStyle = stops[stops.length - 1][1]; ctx.fillRect(x, y + h - 1, w, bottom - y - h + 1); }
+}
+
 // ── Screen-space finishing ───────────────────────────────────────────────
 function vignette(ctx, view, rgb, strength, inner = 0.35, cy = 0.5) {
   const r = Math.hypot(view.w / 2, view.h * 0.62);
@@ -352,11 +406,46 @@ function screenGrad(ctx, view, stops, op = 'source-over') {
   ctx.fillRect(-PAD, -PAD, view.w + 2 * PAD, view.h + 2 * PAD);
   ctx.globalCompositeOperation = 'source-over';
 }
-// Sky gradient filled across a near-static layer (stops: [offset, color] between y0..y1).
+// Colour grade + vignette baked into one screen-sized image (rebuilt when the
+// view size or device scale changes) and blitted 1:1 every frame.
+function drawOverlay(ctx, S, view, grade, vig) {
+  const m = ctx.getTransform();
+  const ds = Math.hypot(m.a, m.b) || 1;
+  const res = ds > 1.25 ? ds / 2 : ds;
+  const key = `${view.w}x${view.h}@${res.toFixed(3)}`;
+  if (S.ovKey !== key) {
+    S.ovKey = key;
+    S.ov = makeSprite(view.w + 2 * PAD, view.h + 2 * PAD, PAD, PAD, res, (g) => {
+      if (grade) screenGrad(g, view, grade);
+      if (vig) vignette(g, view, vig[0], vig[1]);
+    });
+  }
+  if (S.ov) blit(ctx, S.ov.c, -PAD, -PAD, S.ov.w, S.ov.h);
+}
+// Sky gradient across a near-static layer (stops: [offset, color] between y0..y1).
 function drawSky(ctx, cam, view, stops, y0 = -760, y1 = 0, p = 0.04) {
   const b = layer(ctx, cam, view, p);
-  ctx.fillStyle = lin(ctx, 0, y0, 0, y1, stops);
-  ctx.fillRect(b.x0 - 4, b.y0 - 4, b.x1 - b.x0 + 8, b.y1 - b.y0 + 8);
+  fillGrad(ctx, stops, b.x0 - 4, y0, b.x1 - b.x0 + 8, y1 - y0, b.y1 + 4, b.y0 - 4);
+  ctx.restore();
+}
+// Panorama: a big pre-rendered sprite for the static sky (gradient, sun/moon,
+// baked glows, stars) of a near-static layer. Covers every reachable view.
+function makePano(S, stops, p, draw, y0 = -760, y1 = 0) {
+  const w = 2 * (1710 / 2 + PAD + 1200 * p) + 40, top = -(720 * 0.8 + PAD + 460 * p) - 20, bot = 720 * 0.2 + PAD + 20;
+  const spr = makeSprite(w, bot - top, w / 2, -top, S.skyRes, (g) => {
+    g.fillStyle = lin(g, 0, y0, 0, y1, stops);
+    g.fillRect(-w / 2, top, w, bot - top);
+    if (draw) draw(g);
+  });
+  return { spr, stops, p, y0, y1 };
+}
+function drawPano(ctx, cam, view, P) {
+  const b = layer(ctx, cam, view, P.p);
+  const s = P.spr;
+  if (!s || b.x0 < -s.ax || b.x1 > s.w - s.ax || b.y0 < -s.ay || b.y1 > s.h - s.ay) {
+    fillGrad(ctx, P.stops, b.x0 - 4, P.y0, b.x1 - b.x0 + 8, P.y1 - P.y0, b.y1 + 4, b.y0 - 4);
+  }
+  if (s) blit(ctx, s.c, -s.ax, -s.ay, s.w, s.h);
   ctx.restore();
 }
 
@@ -383,7 +472,7 @@ function stepField(list, dt, t, sway = 0, swayF = 1) {
 // Screen position of a field particle; returns false when off-screen. Writes into out[0..2].
 const _fp = [0, 0, 1];
 function fieldPos(p, cam, view) {
-  const z = 1 + (cam.zoom - 1) * p.d;
+  const z = layerZ(cam, p.d);
   const sx = mod(p.x - cam.x * p.d * z, FIELD_W) - FIELD_M;
   if (sx > view.w + FIELD_M) return false;
   const sy = mod(p.y - cam.y * p.d * z, FIELD_H) - FIELD_M;
@@ -852,7 +941,7 @@ IMPL.dojo = {
   build(S) {
     const R = S.rng, res = S.res;
     // High streak clouds lit from below (soft -> low res is fine)
-    S.clouds = makeTileT(2400, 400, res * 0.25, (g, w) => {
+    S.clouds = makeTile(2400, 400, S.softRes, (g, w) => {
       for (let i = 0; i < 24; i++) {
         const x = R() * w, y = R.range(40, 360), cw = R.range(160, 560), ch = R.range(9, 22);
         const lit = y / 400;
@@ -869,7 +958,7 @@ IMPL.dojo = {
       }
     });
     // Far range with a lone snow-capped cone
-    S.mtnA = makeTile(2400, 400, res * 0.5, (g, w, h) => {
+    S.mtnA = makeTile(2400, 400, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[5, 55], [13, 22], [37, 8], [97, 3]]);
       const cone = 1980;
       const ht = (x) => {
@@ -903,7 +992,7 @@ IMPL.dojo = {
       g.fill();
       g.restore();
     });
-    S.mtnB = makeTile(2400, 300, res * 0.5, (g, w, h) => {
+    S.mtnB = makeTile(2400, 300, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[6, 45], [17, 18], [61, 5], [300, 2.5]]);
       g.beginPath();
       g.moveTo(-8, h);
@@ -913,7 +1002,7 @@ IMPL.dojo = {
       g.fillStyle = lin(g, 0, h - 200, 0, h, [[0, '#673865'], [1, '#b0607a']]);
       g.fill();
     });
-    S.hills = makeTile(2400, 440, res * 0.5, (g, w, h) => {
+    S.hills = makeTile(2400, 440, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[4, 30], [11, 14], [40, 4]]);
       const hy = (x) => h - (70 + f(x / w));
       g.beginPath();
@@ -931,13 +1020,13 @@ IMPL.dojo = {
       wrap(w, 700, (xx) => drawPagoda(g, xx, hy(700) + 8, 1.05, 5, col, '#3a1d42', 'rgba(255,150,100,0.5)', 'rgba(255,190,120,0.6)'));
       wrap(w, 1900, (xx) => drawPagoda(g, xx, hy(1900) + 8, 0.7, 3, col, '#3a1d42', 'rgba(255,150,100,0.4)', 'rgba(255,190,120,0.5)'));
     });
-    const hall = dojoHall(res * 0.75);
-    const pag = makeSprite(320, 680, 160, 680, res * 0.75, (g) => {
+    const hall = dojoHall(res);
+    const pag = makeSprite(320, 680, 160, 680, res, (g) => {
       g.fillStyle = rad(g, 0, -200, 10, 260, [[0, 'rgba(255,170,100,0.18)'], [1, 'rgba(255,150,90,0)']]);
       g.fillRect(-160, -680, 320, 680);
       drawPagoda(g, 0, 0, 1.55, 5, '#3c1f38', '#26132a', 'rgba(255,170,110,0.8)', 'rgba(255,200,130,0.75)');
     });
-    const shrine = makeSprite(420, 240, 210, 240, res * 0.75, (g) => {
+    const shrine = makeSprite(420, 240, 210, 240, res, (g) => {
       g.fillStyle = '#3c1f38';
       g.fillRect(-140, -110, 280, 110);
       g.fillStyle = 'rgba(255,200,130,0.6)';
@@ -951,12 +1040,12 @@ IMPL.dojo = {
     });
     S.buildings = [{ s: hall, x: 560, sc: 0.82 }, { s: pag, x: -700, sc: 0.9 }, { s: shrine, x: 1500 }, { s: pag, x: 2300, sc: 0.75 }];
     S.trees = [
-      { s: dojoCherry(res * 0.6, makeRng(S.seed * 31 + 1)), x: -1250 },
-      { s: dojoCherry(res * 0.6, makeRng(S.seed * 31 + 2), 640, 560), x: 1120 },
-      { s: dojoCherry(res * 0.6, makeRng(S.seed * 31 + 3)), x: 2150, sc: 0.9 },
+      { s: dojoCherry(res, makeRng(S.seed * 31 + 1)), x: -1250 },
+      { s: dojoCherry(res, makeRng(S.seed * 31 + 2), 640, 560), x: 1120 },
+      { s: dojoCherry(res, makeRng(S.seed * 31 + 3)), x: 2150, sc: 0.9 },
     ];
     // Low courtyard wall with tiled cap
-    S.wall = makeTile(2400, 140, res * 0.75, (g, w, h) => {
+    S.wall = makeTile(2400, 140, res, (g, w, h) => {
       g.fillStyle = lin(g, 0, h - 92, 0, h, [[0, '#8a4b57'], [1, '#5a2e3e']]);
       g.fillRect(-8, h - 92, w + 16, 92);
       g.fillStyle = '#3f2230';
@@ -1013,7 +1102,7 @@ IMPL.dojo = {
     // Plank rows (floor depth of each seam), growing toward the viewer
     S.rows = [0];
     for (let r = 0, w = 15; r < 300; w *= 1.13) { r += w; S.rows.push(r); }
-    S.grain = makeTileT(1600, 260, res * 0.5, (g, w, h) => {
+    S.grain = makeTile(1600, 260, S.softRes, (g, w, h) => {
       for (let i = 0; i < 260; i++) {
         const y = R() * h, x = R() * w, len = R.range(80, 400);
         const dark = R() < 0.7;
@@ -1383,7 +1472,7 @@ function neonSign(res, R, kind, rgb) {
 IMPL.rooftop = {
   build(S) {
     const R = S.rng, res = S.res;
-    S.clouds = makeTileT(2400, 360, res * 0.25, (g, w) => {
+    S.clouds = makeTile(2400, 360, S.softRes, (g, w) => {
       for (let i = 0; i < 18; i++) {
         const x = R() * w, y = R.range(60, 330), cw = R.range(200, 520), ch = R.range(18, 40);
         wrap(w, x, (xx) => {
@@ -1395,9 +1484,9 @@ IMPL.rooftop = {
         });
       }
     });
-    S.far = skylineTile(R, 2400, 600, res * 0.5, { minW: 30, maxW: 110, minH: 140, maxH: 520, body: '#1b1838', wx: 7, wy: 9, density: 0.3, wa: 0.45, haze: 'rgba(110,40,120,0.85)', edge: 0 });
-    S.mid = skylineTile(R, 2400, 520, res * 0.5, { minW: 60, maxW: 170, minH: 120, maxH: 380, body: '#120f27', wx: 11, wy: 14, density: 0.3, wa: 0.6, haze: 'rgba(80,28,100,0.95)', edge: 0.5 });
-    const bres = res * 0.6;
+    S.far = skylineTile(R, 2400, 600, S.softRes, { minW: 30, maxW: 110, minH: 140, maxH: 520, body: '#1b1838', wx: 7, wy: 9, density: 0.3, wa: 0.45, haze: 'rgba(110,40,120,0.85)', edge: 0 });
+    S.mid = skylineTile(R, 2400, 520, S.softRes, { minW: 60, maxW: 170, minH: 120, maxH: 380, body: '#120f27', wx: 11, wy: 14, density: 0.3, wa: 0.6, haze: 'rgba(80,28,100,0.95)', edge: 0.5 });
+    const bres = res;
     S.near = [
       { s: roofBuilding(bres, R, 280, 640), x: -800 },
       { s: roofBuilding(bres, R, 320, 560), x: 680 },
@@ -1410,7 +1499,7 @@ IMPL.rooftop = {
     S.signs = [];
     const addSign = (kind, x, y, rgb) => {
       R.word = words[wi++ % words.length];
-      S.signs.push({ s: neonSign(res * 0.6, R, kind, rgb), x, y, rgb, kind, a: 1, flick: 0, ph: R() * TAU });
+      S.signs.push({ s: neonSign(res, R, kind, rgb), x, y, rgb, kind, a: 1, flick: 0, ph: R() * TAU });
     };
     addSign('v', -625, -390, NEON[0]);
     addSign('h', 600, -470, NEON[1]);
@@ -1422,7 +1511,7 @@ IMPL.rooftop = {
     S.midSigns = [];
     for (const [x, y, kind, rgb] of [[-260, -330, 'h', NEON[3]], [420, -300, 's', NEON[0]], [-900, -280, 'v', NEON[1]], [1050, -340, 'h', NEON[4]]]) {
       R.word = words[wi++ % words.length];
-      S.midSigns.push({ s: neonSign(res * 0.4, R, kind, rgb), x, y, rgb, kind, a: 1, flick: 0, ph: R() * TAU });
+      S.midSigns.push({ s: neonSign(S.softRes, R, kind, rgb), x, y, rgb, kind, a: 1, flick: 0, ph: R() * TAU });
     }
     // Live windows that toggle on/off on the near buildings
     S.wins = [];
@@ -1436,7 +1525,7 @@ IMPL.rooftop = {
     S.beacons = [
       [0.22, -420, -560], [0.22, 380, -610], [0.22, 960, -520], [0.42, -800, -760], [0.42, 1120, -800], [0.12, 120, -470], [0.12, -900, -500],
     ].map(([p, x, y]) => ({ p, x, y, ph: R() * 3 }));
-    const pres = res * 0.75;
+    const pres = res;
     S.tower = makeSprite(280, 470, 140, 470, pres, (g) => {
       g.strokeStyle = '#0e0c1a';
       g.lineWidth = 7;
@@ -1488,7 +1577,7 @@ IMPL.rooftop = {
       g.fillRect(-8, -172, 16, 7);
     });
     S.props = [{ s: S.tower, x: -560 }, { s: S.ac, x: 700 }, { s: S.shed, x: 1260 }];
-    S.noise = makeTileT(1200, 250, res * 0.5, (g, w, h) => {
+    S.noise = makeTile(1200, 250, S.softRes, (g, w, h) => {
       for (let i = 0; i < 1600; i++) {
         g.fillStyle = R() < 0.5 ? `rgba(0,0,0,${R.range(0.1, 0.35)})` : `rgba(160,140,220,${R.range(0.03, 0.08)})`;
         const x = R() * w, y = R() * h, s = R.range(1, 4);
@@ -1851,7 +1940,7 @@ IMPL.volcano = {
   build(S) {
     const R = S.rng, res = S.res;
     // Smoke banks: unions of puffs filled with one vertical gradient (lit from below)
-    S.smoke = makeTileT(2400, 460, res * 0.25, (g, w) => {
+    S.smoke = makeTile(2400, 460, S.softRes, (g, w) => {
       for (let i = 0; i < 16; i++) {
         const cx = R() * w, cy = R.range(90, 360), span = R.range(260, 760);
         const lit = cy / 460;
@@ -1869,7 +1958,7 @@ IMPL.volcano = {
         g.fill();
       }
     });
-    S.ridge = makeTile(2400, 320, res * 0.5, (g, w, h) => {
+    S.ridge = makeTile(2400, 320, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[7, 55], [19, 25], [53, 10], [140, 4]]);
       const y = (x) => h - (130 + f(x / w) + Math.abs(f(x / w + 0.37)) * 0.8);
       g.beginPath();
@@ -1880,7 +1969,7 @@ IMPL.volcano = {
       g.fillStyle = lin(g, 0, h - 240, 0, h, [[0, '#2a0e0c'], [0.6, '#3a120c'], [1, '#6a2412']]);
       g.fill();
     });
-    S.cliffs = makeTile(2400, 520, res * 0.5, (g, w, h) => {
+    S.cliffs = makeTile(2400, 520, S.softRes, (g, w, h) => {
       const spires = S.spires = [];
       for (let i = 0; i < 8; i++) spires.push([(i + R.range(0.1, 0.9)) * (w / 8), R.range(150, 400), R.range(60, 150)]);
       const f = pfbm(R, [[11, 30], [37, 12], [120, 5]]);
@@ -1915,12 +2004,12 @@ IMPL.volcano = {
       g.restore();
     });
     S.cols = [
-      { s: basaltCluster(res * 0.6, R, 300, 300), x: -980 },
-      { s: basaltCluster(res * 0.6, R, 240, 220), x: 900 },
-      { s: basaltCluster(res * 0.6, R, 340, 360), x: 1950 },
+      { s: basaltCluster(res, R, 300, 300), x: -980 },
+      { s: basaltCluster(res, R, 240, 220), x: 900 },
+      { s: basaltCluster(res, R, 340, 360), x: 1950 },
     ];
     // Lava crust pattern that slides along the river
-    S.crust = makeTileT(1200, 40, res * 0.5, (g, w) => {
+    S.crust = makeTile(1200, 40, S.softRes, (g, w) => {
       for (let i = 0; i < 34; i++) {
         const x = R() * w, y = R.range(6, 34), rw = R.range(20, 70), rh = R.range(1.5, 4);
         wrap(w, x, (xx) => {
@@ -1929,7 +2018,7 @@ IMPL.volcano = {
         });
       }
     });
-    S.rock = makeTileT(1400, 250, res * 0.5, (g, w, h) => {
+    S.rock = makeTile(1400, 250, S.softRes, (g, w, h) => {
       for (let i = 0; i < 900; i++) {
         const x = R() * w, y = R() * h, s = R.range(2, 10);
         g.fillStyle = R() < 0.6 ? `rgba(0,0,0,${R.range(0.15, 0.4)})` : `rgba(140,70,50,${R.range(0.05, 0.12)})`;
@@ -1964,7 +2053,7 @@ IMPL.volcano = {
     S.embersF = makeField(S.frng, S.n(16), (p, r) => { p.d = r.range(1.2, 1.5); p.s = r.range(5, 9); p.vx = r.range(-10, 30); p.vy = -r.range(80, 150); p.tw = r.range(3, 8); });
     S.ash = makeField(S.frng, S.n(40), (p, r) => { p.d = r.range(0.4, 1); p.s = r.range(1, 2.2); p.vx = r.range(10, 30); p.vy = r.range(15, 35); });
     S.shimmer = Array.from({ length: S.hi ? 7 : 3 }, () => ({ x: S.frng.range(-900, 900), y: S.frng.range(-300, 0), s: S.frng.range(140, 260), sp: S.frng.range(18, 35) }));
-    const rock = (w, h) => makeSprite(w, h, w / 2, h, res * 0.6, (g) => {
+    const rock = (w, h) => makeSprite(w, h, w / 2, h, res, (g) => {
       const pts = [[-w / 2, 0]];
       for (let i = 1; i < 8; i++) pts.push([-w / 2 + (i / 8) * w + R.range(-8, 8), -h * Math.sin((i / 8) * Math.PI) * R.range(0.55, 1)]);
       pts.push([w / 2, 0]);
@@ -2294,7 +2383,7 @@ function auroraSprite(top, mid) {
 IMPL.glacier = {
   build(S) {
     const R = S.rng, res = S.res;
-    S.stars = makeTileT(2400, 780, res * 0.5, (g, w, h) => {
+    S.stars = makeTile(2400, 780, S.softRes, (g, w, h) => {
       for (let i = 0; i < 30; i++) {
         const x = (i / 30) * w, y = h * 0.25 + Math.sin((i / 30) * TAU) * 120;
         wrap(w, x, (xx) => {
@@ -2316,20 +2405,20 @@ IMPL.glacier = {
       { y: -560, amp: 40, h: 160, f1: 0.0016, f2: 0.0049, s1: 0.09, s2: -0.15, a: 0.35, spr: 0, x0: -1400, x1: 1400 },
     ];
     const far = { lit: '#9cb6d2', shadow: '#55729a', snowLit: '#e6f0fa', snowShadow: '#9fb4d4', haze: '#2f6f86' };
-    S.mtnFar = makeTile(2400, 460, res * 0.5, (g, w, h) => {
+    S.mtnFar = makeTile(2400, 460, S.softRes, (g, w, h) => {
       const pk = [];
       for (let i = 0; i < 9; i++) pk.push([(i + R()) * (w / 9), R.range(200, 430), R.range(220, 360)]);
       pk.sort((a, b) => b[1] - a[1]);
       for (const [x, ph, hw] of pk) snowPeak(g, R, w, h, x, ph, hw, far);
     });
     const mid = { lit: '#5d7fa6', shadow: '#2c4769', snowLit: '#cfe0f0', snowShadow: '#7b95ba', haze: '#21506a' };
-    S.mtnMid = makeTile(2400, 380, res * 0.5, (g, w, h) => {
+    S.mtnMid = makeTile(2400, 380, S.softRes, (g, w, h) => {
       const pk = [];
       for (let i = 0; i < 8; i++) pk.push([(i + R()) * (w / 8), R.range(140, 330), R.range(170, 280)]);
       pk.sort((a, b) => b[1] - a[1]);
       for (const [x, ph, hw] of pk) snowPeak(g, R, w, h, x, ph, hw, mid);
     });
-    S.ridge = makeTile(2400, 320, res * 0.5, (g, w, h) => {
+    S.ridge = makeTile(2400, 320, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[5, 40], [14, 18], [50, 5]]);
       const y = (x) => h - (90 + f(x / w));
       g.beginPath();
@@ -2348,7 +2437,7 @@ IMPL.glacier = {
     for (const [x, sc] of [[-860, 1], [940, 0.85], [1900, 1.1]]) {
       S.crystals.push({
         x, sc,
-        s: makeSprite(300, 420, 150, 420, res * 0.6, (g) => {
+        s: makeSprite(300, 420, 150, 420, res, (g) => {
           const n = R.int(5, 8);
           for (let i = 0; i < n; i++) {
             const bx = R.range(-110, 110), bw = R.range(18, 40), bh = R.range(120, 400) * (1 - Math.abs(bx) / 200), lean = R.range(-0.35, 0.35);
@@ -2368,7 +2457,7 @@ IMPL.glacier = {
         }),
       });
     }
-    S.ice = makeTileT(1600, 250, res * 0.5, (g, w, h) => {
+    S.ice = makeTile(1600, 250, S.softRes, (g, w, h) => {
       for (let i = 0; i < 26; i++) {
         let x = R() * w, y = R() * h;
         g.strokeStyle = `rgba(235,248,255,${R.range(0.15, 0.4)})`;
@@ -2392,7 +2481,7 @@ IMPL.glacier = {
     S.snow = makeField(S.frng, S.n(120), (p, r) => { p.d = r.range(0.3, 0.85); p.s = r.range(0.8, 2.2) * (0.6 + p.d * 0.6); p.vx = r.range(20, 50); p.vy = r.range(30, 70); });
     S.snowF = makeField(S.frng, S.n(30), (p, r) => { p.d = r.range(1.2, 1.6); p.s = r.range(3, 5.5); p.vx = r.range(40, 80); p.vy = r.range(70, 120); });
     S.glints = Array.from({ length: S.n(22) }, () => ({ u: S.frng.range(-1300, 1300), r: S.frng.range(4, 200), ph: S.frng() * TAU, f: S.frng.range(0.6, 1.6) }));
-    const mound = (w, h) => makeSprite(w, h, w / 2, h, res * 0.5, (g) => {
+    const mound = (w, h) => makeSprite(w, h, w / 2, h, S.softRes, (g) => {
       g.fillStyle = lin(g, 0, -h, 0, 0, [[0, '#f4f9fd'], [0.6, '#c9dceb'], [1, '#9fbbd3']]);
       g.beginPath();
       g.moveTo(-w / 2, 0);
@@ -2679,7 +2768,7 @@ function drawStalks(ctx, b, list, period, t, amp) {
 IMPL.bamboo = {
   build(S) {
     const R = S.rng, res = S.res;
-    S.hills = makeTile(2400, 300, res * 0.25, (g, w, h) => {
+    S.hills = makeTile(2400, 300, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[4, 50], [11, 22], [31, 8]]);
       g.beginPath();
       g.moveTo(-8, h);
@@ -2688,13 +2777,13 @@ IMPL.bamboo = {
       g.fillStyle = lin(g, 0, h - 220, 0, h, [[0, '#9fbea0'], [1, '#d7e2bf']]);
       g.fill();
     });
-    const far = [0, 1, 2, 3].map(() => bambooStalk(res * 0.35, R, 760, R.range(8, 12), '#a2bf9f', '#9ab996'));
-    const mid = [0, 1, 2, 3].map(() => bambooStalk(res * 0.45, R, 900, R.range(14, 19), '#72a06c', '#6f9b66'));
-    const near = [0, 1, 2].map(() => bambooStalk(res * 0.55, R, 1150, R.range(26, 34), '#3f6d40', '#3d6a3a'));
+    const far = [0, 1, 2, 3].map(() => bambooStalk(S.softRes, R, 760, R.range(8, 12), '#a2bf9f', '#9ab996'));
+    const mid = [0, 1, 2, 3].map(() => bambooStalk(S.softRes, R, 900, R.range(14, 19), '#72a06c', '#6f9b66'));
+    const near = [0, 1, 2].map(() => bambooStalk(res, R, 1150, R.range(26, 34), '#3f6d40', '#3d6a3a'));
     S.far = stalkLayer(R, 34, 2000, far);
     S.mid = stalkLayer(R, 20, 2200, mid);
     S.near = stalkLayer(R, 8, 2600, near).filter((o) => Math.abs(mod(o.x + 1300, 2600) - 1300) > 260);
-    S.lantern = stoneLantern(res * 0.7);
+    S.lantern = stoneLantern(res);
     S.leafSpr = [0, 1].map((v) => makeSprite(26, 10, 13, 5, res, (g) => {
       g.fillStyle = v ? '#8fb55e' : '#5f8f3e';
       g.beginPath();
@@ -2729,7 +2818,7 @@ IMPL.bamboo = {
         u += wdt;
       }
     }
-    S.moss = makeTileT(1400, 260, res * 0.5, (g, w, h) => {
+    S.moss = makeTile(1400, 260, S.softRes, (g, w, h) => {
       for (let i = 0; i < 140; i++) {
         const x = R() * w, y = R() * h, rw = R.range(10, 50);
         wrap(w, x, (xx) => {
@@ -2747,7 +2836,7 @@ IMPL.bamboo = {
     S.leaves = makeField(S.frng, S.n(10), (p, r) => { p.d = r.range(0.5, 0.9); p.s = r.range(0.8, 1.1); p.vx = r.range(8, 24); p.vy = r.range(20, 40); p.vr = r.range(-1, 1); p.v = r.int(0, 1); p.a = 0.85; });
     S.leavesF = makeField(S.frng, S.n(4), (p, r) => { p.d = r.range(1.25, 1.5); p.s = r.range(2, 2.6); p.vx = r.range(15, 30); p.vy = r.range(30, 50); p.vr = r.range(-1, 1); p.v = r.int(0, 1); p.a = 0.95; });
     S.flies = Array.from({ length: S.n(14) }, () => ({ x: S.frng.range(-1300, 1300), y: S.frng.range(-320, -30), ph: S.frng() * TAU, f: S.frng.range(0.3, 0.7), bl: S.frng() * TAU }));
-    S.ferns = makeSprite(420, 160, 0, 160, res * 0.5, (g) => {
+    S.ferns = makeSprite(420, 160, 0, 160, S.softRes, (g) => {
       g.fillStyle = '#1f3320';
       for (let i = 0; i < 9; i++) {
         const a = -Math.PI / 2 + R.range(-0.9, 0.9) + 0.4, L = R.range(90, 160);
@@ -3005,7 +3094,7 @@ function templeColumn(g, x, base, top, wdt, broken) {
 IMPL.temple = {
   build(S) {
     const R = S.rng, res = S.res;
-    S.cirrus = makeTileT(2400, 320, res * 0.25, (g, w) => {
+    S.cirrus = makeTile(2400, 320, S.softRes, (g, w) => {
       for (let i = 0; i < 16; i++) {
         const x = R() * w, y = R.range(30, 280), cw = R.range(200, 500), ch = R.range(6, 14);
         wrap(w, x, (xx) => {
@@ -3014,15 +3103,15 @@ IMPL.temple = {
         });
       }
     });
-    S.seaFar = cloudBank(R, 2400, 260, res * 0.25, { top: 150, n: 90, rMin: 40, rMax: 95, jitter: 40, shade: '#e3b7c6', base: '#c9a3c4', lit: 'rgba(255,240,220,0.95)', litFade: '#ffe9d6', seed: 11 });
-    S.seaMid = cloudBank(R, 2400, 220, res * 0.25, { top: 110, n: 70, rMin: 45, rMax: 100, jitter: 30, shade: '#f2d2d6', base: '#dcb8cc', lit: 'rgba(255,250,240,0.95)', litFade: '#fff3e6', seed: 23 });
+    S.seaFar = cloudBank(R, 2400, 260, S.softRes, { top: 150, n: 90, rMin: 40, rMax: 95, jitter: 40, shade: '#e3b7c6', base: '#c9a3c4', lit: 'rgba(255,240,220,0.95)', litFade: '#ffe9d6', seed: 11 });
+    S.seaMid = cloudBank(R, 2400, 220, S.softRes, { top: 110, n: 70, rMin: 45, rMax: 100, jitter: 30, shade: '#f2d2d6', base: '#dcb8cc', lit: 'rgba(255,250,240,0.95)', litFade: '#fff3e6', seed: 23 });
     S.islands = [
-      { s: floatingIsland(res * 0.5, R, 180), x: -560, y: -360, p: 0.12, ph: 0 },
-      { s: floatingIsland(res * 0.5, R, 120), x: 700, y: -430, p: 0.1, ph: 2 },
-      { s: floatingIsland(res * 0.55, R, 240), x: 980, y: -300, p: 0.2, ph: 4 },
-      { s: floatingIsland(res * 0.5, R, 150), x: -1350, y: -260, p: 0.2, ph: 1 },
+      { s: floatingIsland(S.softRes, R, 180), x: -560, y: -360, p: 0.12, ph: 0 },
+      { s: floatingIsland(S.softRes, R, 120), x: 700, y: -430, p: 0.1, ph: 2 },
+      { s: floatingIsland(res, R, 240), x: 980, y: -300, p: 0.2, ph: 4 },
+      { s: floatingIsland(S.softRes, R, 150), x: -1350, y: -260, p: 0.2, ph: 1 },
     ];
-    S.balus = makeTile(440, 74, res * 0.75, (g, w, h) => {
+    S.balus = makeTile(440, 74, res, (g, w, h) => {
       const top = h - 64;
       g.fillStyle = lin(g, 0, top, 0, h, [[0, '#f7efe5'], [1, '#cdbbaa']]);
       for (let x = 11; x < w; x += 22) {
@@ -3037,7 +3126,7 @@ IMPL.temple = {
       g.fillStyle = lin(g, 0, h - 12, 0, h, [[0, '#efe4d6'], [1, '#bfae9c']]);
       g.fillRect(-8, h - 12, w + 16, 12);
     });
-    S.veins = makeTileT(1500, 250, res * 0.5, (g, w, h) => {
+    S.veins = makeTile(1500, 250, S.softRes, (g, w, h) => {
       for (let i = 0; i < 40; i++) {
         let x = R() * w, y = R() * h;
         g.strokeStyle = `rgba(120,100,110,${R.range(0.06, 0.16)})`;
@@ -3336,7 +3425,7 @@ function drawBat(ctx, x, y, s, flap) {
 }
 
 function fogTile(R, w, h, res, rgb) {
-  return makeTileT(w, h, res, (g) => {
+  return makeTile(w, h, res, (g) => {
     for (let i = 0; i < 46; i++) {
       const x = R() * w, y = R.range(h * 0.35, h * 0.75), rw = R.range(120, 300), rh = R.range(26, 60);
       wrap(w, x, (xx) => {
@@ -3354,14 +3443,14 @@ function fogTile(R, w, h, res, rgb) {
 IMPL.necropolis = {
   build(S) {
     const R = S.rng, res = S.res;
-    S.stars = makeTileT(2400, 560, res * 0.5, (g, w, h) => {
+    S.stars = makeTile(2400, 560, S.softRes, (g, w, h) => {
       for (let i = 0; i < 300; i++) {
         const x = R() * w, y = Math.pow(R(), 1.6) * h;
         g.fillStyle = `rgba(220,235,255,${R.range(0.2, 0.7)})`;
         wrap(w, x, (xx) => g.fillRect(xx, y, R() < 0.9 ? 1.2 : 2, R() < 0.9 ? 1.2 : 2));
       }
     });
-    S.moon = makeSprite(300, 300, 150, 150, res * 0.6, (g) => {
+    S.moon = makeSprite(300, 300, 150, 150, res, (g) => {
       g.fillStyle = rad(g, -30, -30, 10, 125, [[0, '#fbf9e8'], [0.75, '#e8e5cc'], [1, '#cfcdb4']]);
       g.beginPath(); g.arc(0, 0, 120, 0, TAU); g.fill();
       g.save();
@@ -3384,7 +3473,7 @@ IMPL.necropolis = {
       g.fillRect(-120, -120, 240, 240);
       g.restore();
     });
-    S.clouds = makeTileT(2400, 420, res * 0.25, (g, w) => {
+    S.clouds = makeTile(2400, 420, S.softRes, (g, w) => {
       for (let i = 0; i < 12; i++) {
         const x = R() * w, y = R.range(60, 380), cw = R.range(220, 520), ch = R.range(12, 26);
         wrap(w, x, (xx) => {
@@ -3397,7 +3486,7 @@ IMPL.necropolis = {
         });
       }
     });
-    S.far = makeTile(2400, 460, res * 0.5, (g, w, h) => {
+    S.far = makeTile(2400, 460, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[4, 40], [12, 16], [40, 5]]);
       const hy = (x) => h - (110 + f(x / w));
       const col = '#111a29';
@@ -3426,7 +3515,7 @@ IMPL.necropolis = {
       g.fillStyle = lin(g, 0, h - 120, 0, h, [[0, 'rgba(54,98,90,0)'], [1, 'rgba(54,98,90,0.6)']]);
       g.fillRect(-8, h - 120, w + 16, 120);
     });
-    S.mid = makeTile(2400, 320, res * 0.5, (g, w, h) => {
+    S.mid = makeTile(2400, 320, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[5, 24], [17, 9]]);
       const hy = (x) => h - (60 + f(x / w));
       const col = '#0b111b';
@@ -3457,12 +3546,12 @@ IMPL.necropolis = {
       g.fillRect(-8, h - 90, w + 16, 90);
     });
     S.trees = [
-      { s: gnarledTree(res * 0.5, R, 760, 720), x: -620 },
-      { s: gnarledTree(res * 0.5, R, 640, 640), x: 760 },
-      { s: gnarledTree(res * 0.5, R, 700, 680), x: 2000 },
+      { s: gnarledTree(S.softRes, R, 760, 720), x: -620 },
+      { s: gnarledTree(S.softRes, R, 640, 640), x: 760 },
+      { s: gnarledTree(S.softRes, R, 700, 680), x: 2000 },
     ];
     // Gravestones + iron fence strip
-    S.graves = makeTile(2400, 230, res * 0.75, (g, w, h) => {
+    S.graves = makeTile(2400, 230, res, (g, w, h) => {
       const stone = '#1b2330', rim = 'rgba(170,205,195,0.45)';
       for (let i = 0; i < 22; i++) {
         const x = R() * w, kind = R.int(0, 3), s = R.range(0.7, 1.2), tilt = R.range(-0.12, 0.12);
@@ -3503,8 +3592,8 @@ IMPL.necropolis = {
         g.fillRect(sx + len - 7, h - 118, 14, 118);
       }
     });
-    S.fog = fogTile(R, 2400, 220, res * 0.25, '160,200,190');
-    S.flag = makeTileT(1600, 260, res * 0.5, (g, w, h) => {
+    S.fog = fogTile(R, 2400, 220, S.softRes, '160,200,190');
+    S.flag = makeTile(1600, 260, S.softRes, (g, w, h) => {
       for (let i = 0; i < 70; i++) {
         const x = R() * w, y = R() * h, rw = R.range(20, 70);
         wrap(w, x, (xx) => {
@@ -3751,7 +3840,7 @@ IMPL.foundry = {
   build(S) {
     const R = S.rng, res = S.res;
     // Far wall: steel frame, tall cold windows
-    S.wall = makeTile(2400, 760, res * 0.5, (g, w, h) => {
+    S.wall = makeTile(2400, 760, S.softRes, (g, w, h) => {
       g.fillStyle = '#16100d';
       g.fillRect(-8, 0, w + 16, h);
       for (let i = 0; i < 4; i++) {
@@ -3785,14 +3874,14 @@ IMPL.foundry = {
       g.fillRect(-8, h - 320, w + 16, 320);
     });
     S.gears = [
-      { s: gearSprite(res * 0.5, 170, 18, '#3a302b'), x: -560, y: -440, w: 0.22, p: 0.2 },
-      { s: gearSprite(res * 0.5, 104, 11, '#3f3430'), x: -322, y: -300, w: -0.36, p: 0.2, a0: 0.15 },
-      { s: gearSprite(res * 0.5, 210, 22, '#352c28'), x: 760, y: -420, w: -0.15, p: 0.2 },
-      { s: gearSprite(res * 0.55, 120, 13, '#2e2622'), x: -1020, y: -560, w: 0.3, p: 0.34 },
-      { s: gearSprite(res * 0.55, 150, 16, '#2e2622'), x: 1150, y: -600, w: -0.24, p: 0.34 },
+      { s: gearSprite(S.softRes, 170, 18, '#3a302b'), x: -560, y: -440, w: 0.22, p: 0.2 },
+      { s: gearSprite(S.softRes, 104, 11, '#3f3430'), x: -322, y: -300, w: -0.36, p: 0.2, a0: 0.15 },
+      { s: gearSprite(S.softRes, 210, 22, '#352c28'), x: 760, y: -420, w: -0.15, p: 0.2 },
+      { s: gearSprite(res, 120, 13, '#2e2622'), x: -1020, y: -560, w: 0.3, p: 0.34 },
+      { s: gearSprite(res, 150, 16, '#2e2622'), x: 1150, y: -600, w: -0.24, p: 0.34 },
     ];
     // Pipes with flanges, valves and gauges
-    S.pipes = makeTile(2400, 620, res * 0.5, (g, w, h) => {
+    S.pipes = makeTile(2400, 620, S.softRes, (g, w, h) => {
       const pipe = (x0, y0, x1, y1, r) => {
         const horiz = y0 === y1;
         g.fillStyle = horiz
@@ -3834,7 +3923,7 @@ IMPL.foundry = {
     S.sparks = [];
     S.sparkT = 1;
     S.chains = [-760, -330, 420, 880].map((x) => ({ x, hang: R.range(330, 450), ang: 0, av: 0, ph: R() * TAU }));
-    S.grime = makeTileT(1400, 260, res * 0.5, (g, w, h) => {
+    S.grime = makeTile(1400, 260, S.softRes, (g, w, h) => {
       for (let i = 0; i < 120; i++) {
         const x = R() * w, y = R() * h, rw = R.range(14, 60);
         wrap(w, x, (xx) => {
@@ -3845,7 +3934,7 @@ IMPL.foundry = {
     });
     S.embers = makeField(S.frng, S.n(36), (p, r) => { p.d = r.range(0.3, 0.9); p.s = r.range(1.5, 3.5); p.vx = r.range(-10, 10); p.vy = -r.range(20, 60); p.tw = r.range(4, 9); });
     S.dust = makeField(S.frng, S.n(40), (p, r) => { p.d = r.range(0.2, 0.7); p.s = r.range(0.8, 1.8); p.vx = r.range(4, 12); p.vy = r.range(-4, 6); });
-    const girder = makeSprite(340, 110, 170, 110, res * 0.5, (g) => {
+    const girder = makeSprite(340, 110, 170, 110, S.softRes, (g) => {
       g.fillStyle = '#0b0807';
       g.fillRect(-170, -110, 340, 16);
       g.fillRect(-170, -18, 340, 18);
@@ -3857,7 +3946,7 @@ IMPL.foundry = {
       g.fillStyle = 'rgba(255,140,60,0.35)';
       g.fillRect(-170, -110, 340, 2);
     });
-    const post = makeSprite(120, 150, 60, 150, res * 0.5, (g) => {
+    const post = makeSprite(120, 150, 60, 150, S.softRes, (g) => {
       g.fillStyle = '#0b0807';
       g.fillRect(-12, -150, 24, 150);
       g.fillRect(-60, -110, 120, 8);
@@ -4176,9 +4265,9 @@ IMPL.void = {
         });
       }
     };
-    S.neb1 = makeTileT(2400, 820, res * 0.15, (g, w, h) => blobs(g, w, h, 40, ['120,40,220', '60,30,180', '200,40,160'], 160, 380, 0.35));
-    S.neb2 = makeTileT(2400, 820, res * 0.15, (g, w, h) => blobs(g, w, h, 30, ['255,70,200', '60,190,255', '150,70,255'], 90, 240, 0.28));
-    S.stars = makeTileT(2400, 820, res * 0.5, (g, w, h) => {
+    S.neb1 = makeTile(2400, 820, S.softRes, (g, w, h) => blobs(g, w, h, 40, ['120,40,220', '60,30,180', '200,40,160'], 160, 380, 0.35));
+    S.neb2 = makeTile(2400, 820, S.softRes, (g, w, h) => blobs(g, w, h, 30, ['255,70,200', '60,190,255', '150,70,255'], 90, 240, 0.28));
+    S.stars = makeTile(2400, 820, S.softRes, (g, w, h) => {
       for (let i = 0; i < 520; i++) {
         const x = R() * w, y = R() * h, s = R() < 0.9 ? R.range(0.6, 1.3) : R.range(1.6, 2.4);
         g.fillStyle = `rgba(${R.pick(['255,255,255', '220,200,255', '190,230,255'])},${R.range(0.3, 0.95)})`;
@@ -4187,7 +4276,7 @@ IMPL.void = {
     });
     S.tw = Array.from({ length: S.n(36) }, () => ({ x: S.frng.range(-1200, 1200), y: S.frng.range(-800, -120), s: S.frng.range(1.4, 2.6), ph: S.frng() * TAU, f: S.frng.range(1, 3) }));
     // accretion swirl around the rift
-    S.swirl = makeSprite(900, 900, 450, 450, res * 0.3, (g) => {
+    S.swirl = makeSprite(900, 900, 450, 450, S.softRes, (g) => {
       for (let arm = 0; arm < 3; arm++) {
         for (let i = 0; i < 160; i++) {
           const k = i / 160, a = arm * (TAU / 3) + k * 5.2, r = 60 + k * 380;
@@ -4211,7 +4300,7 @@ IMPL.void = {
     // crystal clusters near the arena edges
     S.crystals = [-780, 820, 2300].map((x) => ({
       x,
-      s: makeSprite(320, 300, 160, 300, res * 0.6, (g) => {
+      s: makeSprite(320, 300, 160, 300, res, (g) => {
         for (let i = 0; i < 7; i++) {
           const bx = R.range(-100, 100), bw = R.range(14, 30), bh = R.range(90, 280) * (1 - Math.abs(bx) / 180), tx = bx + R.range(-0.5, 0.5) * bh * 0.4;
           g.fillStyle = lin(g, bx - bw, 0, bx + bw, 0, [[0, '#2a1250'], [0.45, '#7b4dd6'], [0.55, '#4b2a96'], [1, '#1a0a34']]);
@@ -4226,7 +4315,7 @@ IMPL.void = {
     S.rows = [0, 18, 42, 74, 116, 170, 240, 330];
     S.motes = makeField(S.frng, S.n(60), (p, r) => { p.d = r.range(0.3, 0.9); p.s = r.range(1.5, 3.5); p.vx = r.range(-8, 8); p.vy = -r.range(10, 35); p.tw = r.range(1, 4); p.c = r() < 0.6 ? 0 : 1; });
     S.motesF = makeField(S.frng, S.n(10), (p, r) => { p.d = r.range(1.2, 1.5); p.s = r.range(5, 9); p.vx = r.range(-6, 6); p.vy = -r.range(15, 30); p.tw = r.range(1, 3); p.a = 0.6; });
-    const tips = (w, h) => makeSprite(w, h, w / 2, h, res * 0.5, (g) => {
+    const tips = (w, h) => makeSprite(w, h, w / 2, h, S.softRes, (g) => {
       for (let i = 0; i < 5; i++) {
         const bx = R.range(-w * 0.35, w * 0.35), bw = R.range(12, 26), bh = h * R.range(0.4, 1), tx = bx + R.range(-20, 20);
         g.fillStyle = '#0c0418';
@@ -4765,6 +4854,37 @@ function safeView(view) {
   return { w, h };
 }
 
+// Device scale guess before the first draw (virtual height is 720).
+function guessScale() {
+  try {
+    if (typeof window !== 'undefined' && window.innerHeight > 0) {
+      return ((window.innerHeight * (window.devicePixelRatio || 1)) / 720);
+    }
+  } catch { /* ignore */ }
+  return 1;
+}
+const capRes = (ds) => clamp(ds, 0.2, 2);
+
+// (Re)build an arena's caches at cache resolution `res` (device px per unit).
+// RNGs are re-seeded so the layout is identical whatever the resolution.
+function buildArena(S, res) {
+  S.res = res;
+  S.softRes = res > 1.25 ? res / 2 : res;   // soft / distant scenery on HiDPI
+  S.skyRes = Math.min(res, 1);
+  S.rng = makeRng((hashStr(S.id) ^ Math.imul(S.seed | 0, 0x9e3779b1)) >>> 0);       // layout + runtime
+  S.frng = makeRng((hashStr(S.id + ':fx') ^ Math.imul(S.seed | 0, 0x85ebca6b)) >>> 0); // quality-scaled particle setup
+  S.ovKey = null;
+  const bytes0 = _cacheBytes;
+  try {
+    IMPL[S.id].build(S);
+    S.buildError = null;
+  } catch (e) {
+    // Never let a missing canvas (e.g. headless Node) break the game.
+    S.buildError = e;
+  }
+  S.cacheBytes = _cacheBytes - bytes0;
+}
+
 export function createArenaState(id, { quality = 'high', seed = 1, res } = {}) {
   const def = ARENA_BY_ID.get(id) || ARENAS[0];
   const hi = quality !== 'low';
@@ -4773,24 +4893,23 @@ export function createArenaState(id, { quality = 'high', seed = 1, res } = {}) {
     def,
     quality: hi ? 'high' : 'low',
     hi,
-    res: res || (hi ? 2 : 1),
     seed,
-    rng: makeRng((hashStr(def.id) ^ Math.imul(seed | 0, 0x9e3779b1)) >>> 0),   // layout + runtime
-    frng: makeRng((hashStr(def.id + ':fx') ^ Math.imul(seed | 0, 0x85ebca6b)) >>> 0), // quality-scaled particle setup
     t: 0,
     debris: [],
     maxDebris: hi ? 420 : 200,
     n: (k) => Math.max(1, Math.round(hi ? k : k * 0.5)),  // particle count scaler
   };
-  const bytes0 = _cacheBytes;
-  try {
-    IMPL[def.id].build(S);
-  } catch (e) {
-    // Never let a missing canvas (e.g. headless Node) break the game.
-    S.buildError = e;
-  }
-  S.cacheBytes = _cacheBytes - bytes0;
+  buildArena(S, capRes(res || guessScale()));
   return S;
+}
+
+// Caches are built for the device scale seen on the first draw; if the target
+// context's scale differs noticeably (window resize, other canvas), rebuild.
+function ensureRes(ctx, S) {
+  const m = ctx.getTransform ? ctx.getTransform() : null;
+  if (!m) return;
+  const want = capRes(Math.hypot(m.a, m.b) || 1);
+  if (Math.abs(want - S.res) > want * (S.resTol || 0.01)) buildArena(S, want);
 }
 
 export function updateArena(state, dt) {
@@ -4805,6 +4924,7 @@ export function drawArenaBack(ctx, state, cam, view) {
   if (!ctx || !state) return;
   cam = safeCam(cam);
   view = safeView(view);
+  ensureRes(ctx, state);
   ctx.save();
   if (!state.buildError) IMPL[state.id].back(ctx, state, cam, view);
   else { ctx.fillStyle = state.def.ambient; ctx.fillRect(0, 0, view.w, view.h); }
@@ -4845,7 +4965,8 @@ export function drawArenaPreview(ctx, id, x, y, w, h, t = 0) {
   t = Number.isFinite(t) ? t : 0;
   let pv = _previews.get(id);
   if (!pv) {
-    const st = createArenaState(id, { quality: 'low', seed: 1, res: 0.75 });
+    const st = createArenaState(id, { quality: 'low', seed: 1, res: 0.4 });
+    st.resTol = 0.6;   // thumbnails may be drawn at a few sizes: don't rebuild for each
     for (let i = 0; i < 90; i++) updateArena(st, 1 / 30);
     pv = { st, img: null, cw: 0, ch: 0, lastT: null };
     _previews.set(id, pv);

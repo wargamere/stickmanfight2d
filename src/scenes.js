@@ -7,7 +7,7 @@ import { audio } from './audio.js';
 import { ARENAS, drawArenaPreview } from './arenas.js';
 import { FIGHTER_DEFS, getFighter, STARTERS } from './roster.js';
 import { HATS } from './accessories.js';
-import { TOWERS, MODS, buildMods, ACHIEVEMENTS, QUICK_DIFFICULTIES, MOVE_LIST_COMMON } from './modes.js';
+import { TOWERS, MODS, buildMods, ACHIEVEMENTS, QUICK_DIFFICULTIES, MOVE_LIST_COMMON, dailyChallenge } from './modes.js';
 import { Progress } from './progress.js';
 import { FighterPreview } from './preview.js';
 import { drawPortrait } from './hud.js';
@@ -166,13 +166,14 @@ export function createScenes(game) {
         { label: 'QUICK FIGHT', desc: 'Pick a fighter, an opponent, a stage and a difficulty. Straight into the action.', color: C.accent, action: () => startQuickFight() },
         { label: 'VERSUS', desc: 'Two players, one keyboard (or two gamepads). Settle it.', color: '#ff4d6d', action: () => startVersus() },
         { label: 'SURVIVAL', desc: 'Endless waves of increasingly deadly opponents. Health carries over. How far can you go?', color: '#3ddc97', action: () => startSurvival() },
+        { label: 'DAILY CHALLENGE', desc: dailyDesc(), color: '#ff8fd8', badge: S().daily.last === dailyChallenge().key ? 'DONE' : 'NEW', action: () => startDaily() },
         { label: 'TRAINING', desc: 'Practice combos against a configurable dummy. Hitbox view, infinite power, instant refills.', color: '#4ab8ff', action: () => startTraining() },
         { label: 'LOCKER', desc: 'Spend coins on new fighters, color skins and hats.', color: '#c58bff', action: () => game.go(new Locker()) },
         { label: 'PROFILE', desc: 'Your stats and achievements.', color: '#ffb347', action: () => game.go(new Profile()) },
         { label: 'HOW TO PLAY', desc: 'Controls, mechanics and pro tips.', color: '#7fe3ff', action: () => game.go(new HowTo()) },
         { label: 'SETTINGS', desc: 'Audio, visuals, accessibility, touch controls and key bindings.', color: '#9aa3ad', action: () => game.go(new Settings()) },
       ];
-      this.menu = new ListMenu(items, { x: 70, y: 178, w: 380, h: 46, gap: 7, size: 23, start, onBack: () => game.go(new TitleScene()) });
+      this.menu = new ListMenu(items, { x: 70, y: 172, w: 380, h: 42, gap: 6, size: 22, start, onBack: () => game.go(new TitleScene()) });
       this.dim = 0.7;
       const eq = equipped(S(), S().lastP1);
       this.preview = new FighterPreview(S().unlocked.includes(S().lastP1) ? S().lastP1 : 'kai', { skin: eq.skin, hat: eq.hat, facing: -1 });
@@ -949,6 +950,66 @@ export function createScenes(game) {
     }));
   }
 
+  function dailyDesc() {
+    const d = dailyChallenge();
+    const opp = getFighter(d.opp);
+    const done = S().daily.last === d.key;
+    return `Today: ${opp.name} on ${arenaName(d.arena)} with ${d.mods.map((m) => MODS[m].name).join(' + ')}. ` +
+      (done ? 'Cleared today — come back tomorrow!' : `Win for ${dailyReward()} coins. Streak: ${S().daily.streak} day${S().daily.streak === 1 ? '' : 's'}.`);
+  }
+  function dailyReward() {
+    return 300 + Math.min(S().daily.streak, 7) * 50;
+  }
+  function startDaily() {
+    game.go(new CharSelect({
+      steps: [{ who: 'p1', label: 'YOU' }],
+      titleStr: 'DAILY CHALLENGE',
+      onBack: () => game.go(new MainMenu(4)),
+      onDone: (picks) => runDaily(picks[0]),
+    }));
+  }
+  function runDaily(pickP1) {
+    const d = dailyChallenge();
+    const cfg = {
+      mode: 'daily',
+      p1: { ...pickP1, ctrl: 'solo' },
+      p2: { id: d.opp, ctrl: 'cpu', level: d.lvl, skin: d.skin },
+      arena: d.arena, rounds: d.rounds, time: 99, mods: buildMods(d.mods),
+      labels: ['YOU', 'DAILY'],
+      introText: 'DAILY CHALLENGE', introSub: d.mods.map((m) => MODS[m].name).join(' · '),
+      subLabel: d.mods.map((m) => MODS[m].name.toUpperCase()).join(' · '),
+    };
+    game.go(new FightScene(cfg, {
+      onRetry: () => runDaily(pickP1),
+      onQuit: () => game.go(new MainMenu(4)),
+      onEnd: (res, m) => {
+        P.recordMatch(res, 0);
+        const won = res.winner === 0;
+        const daily = S().daily;
+        const first = daily.last !== d.key;
+        const rewards = [];
+        if (won && first) {
+          daily.streak = daily.last === d.yesterday ? daily.streak + 1 : 1;
+          daily.best = Math.max(daily.best, daily.streak);
+          const coins = 300 + Math.min(daily.streak - 1, 7) * 50;
+          daily.last = d.key;
+          rewards.push([`Daily challenge (streak ${daily.streak})`, coins]);
+          P.coins(coins, true);
+        } else if (won) rewards.push(['Already cleared today', 0]);
+        game.persist();
+        game.go(new Results({
+          result: res, match: m, rewards,
+          headline: { text: won ? 'CHALLENGE CLEARED' : 'DEFEAT', win: won },
+          sub: `Daily ${d.key} · vs ${m.f[1].def.name}`,
+          items: [
+            ...(won ? [] : [{ label: 'TRY AGAIN', action: () => runDaily(pickP1) }]),
+            { label: 'MAIN MENU', action: () => game.go(new MainMenu(4)) },
+          ],
+        }));
+      },
+    }));
+  }
+
   function startSurvival() {
     game.go(new CharSelect({
       steps: [{ who: 'p1', label: 'YOU' }],
@@ -1016,7 +1077,7 @@ export function createScenes(game) {
     game.go(new CharSelect({
       steps: [{ who: 'p1', label: 'YOU' }, { who: 'cpu', label: 'DUMMY', allowLocked: true }],
       titleStr: 'TRAINING',
-      onBack: () => game.go(new MainMenu(4)),
+      onBack: () => game.go(new MainMenu(5)),
       onDone: (picks) => {
         const cfg = {
           mode: 'training',
@@ -1025,7 +1086,7 @@ export function createScenes(game) {
           arena: 'lab', rounds: 1, time: 0, intro: false, music: 'battle1',
           labels: ['YOU', 'DUMMY'],
         };
-        game.go(new FightScene(cfg, { onQuit: () => game.go(new MainMenu(4)) }));
+        game.go(new FightScene(cfg, { onQuit: () => game.go(new MainMenu(5)) }));
       },
     }));
   }
@@ -1444,7 +1505,7 @@ export function createScenes(game) {
         }));
       }
       const prev = this.menu?.i || 0;
-      this.menu = new ListMenu(items, { x: 60, y: 190, w: 420, h: 42, gap: 6, size: 19, maxVisible: 10, start: Math.min(prev, items.length - 1), onBack: () => game.go(new MainMenu(5)) });
+      this.menu = new ListMenu(items, { x: 60, y: 190, w: 420, h: 42, gap: 6, size: 19, maxVisible: 10, start: Math.min(prev, items.length - 1), onBack: () => game.go(new MainMenu(6)) });
       this.refreshPreview();
     }
     poor() {
@@ -1557,9 +1618,9 @@ export function createScenes(game) {
       if (menu.fired.up || pointer.wheel < 0) this.scroll = Math.max(0, this.scroll - 1);
       if (menu.fired.back || menu.fired.confirm) {
         sfx('uiBack');
-        game.go(new MainMenu(6));
+        game.go(new MainMenu(7));
       }
-      if (pointer.pressed && pointer.x < 120 && pointer.y < 120) game.go(new MainMenu(6));
+      if (pointer.pressed && pointer.x < 120 && pointer.y < 120) game.go(new MainMenu(7));
     }
     draw(ctx, view) {
       this.drawBG(ctx, view);
@@ -1624,7 +1685,7 @@ export function createScenes(game) {
         { label: 'CONTROLS', action: () => game.go(new Controls()) },
         { label: 'RESET PROGRESS', color: '#ff5c5c', action: () => (this.confirm = { t: 0 }) },
       ];
-      this.menu = new ListMenu(items, { x: 60, y: 140, w: 560, h: 44, gap: 7, size: 20, onBack: () => game.go(new MainMenu(8)) });
+      this.menu = new ListMenu(items, { x: 60, y: 140, w: 560, h: 44, gap: 7, size: 20, onBack: () => game.go(new MainMenu(9)) });
     }
     set(k, v) {
       settings()[k] = v;
@@ -1863,14 +1924,14 @@ export function createScenes(game) {
       if (menu.fired.right || menu.fired.confirm || (pointer.pressed && pointer.x > view.w * 0.8)) this.flip(1);
       if (menu.fired.back) {
         sfx('uiBack');
-        game.go(new MainMenu(7));
+        game.go(new MainMenu(8));
       }
     }
     flip(d) {
       const n = this.page + d;
       if (n < 0) return;
       if (n >= PAGES.length) {
-        game.go(new MainMenu(7));
+        game.go(new MainMenu(8));
         return;
       }
       this.page = n;
