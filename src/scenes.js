@@ -104,6 +104,7 @@ export function createScenes(game) {
   class TitleScene extends MenuScene {
     constructor() {
       super();
+      this.touchBack = false;
       this.dim = 0.35;
     }
     update(view) {
@@ -159,6 +160,7 @@ export function createScenes(game) {
   class MainMenu extends MenuScene {
     constructor(start = 0) {
       super();
+      this.touchBack = false;
       const items = [
         { label: 'TOWERS', desc: 'Climb nine towers of escalating challenges, modifiers and champions. Beat a tower to unlock its champion.', color: '#ff9a3c', action: () => game.go(new TowerSelect()) },
         { label: 'QUICK FIGHT', desc: 'Pick a fighter, an opponent, a stage and a difficulty. Straight into the action.', color: C.accent, action: () => startQuickFight() },
@@ -762,6 +764,7 @@ export function createScenes(game) {
   class Results extends MenuScene {
     constructor({ result, match, headline, sub, rewards = [], items, winnerSide, humanSide = 0 }) {
       super();
+      this.touchBack = false;
       this.dim = 0.92;
       this.music = null;
       this.result = result;
@@ -1305,6 +1308,7 @@ export function createScenes(game) {
   class TowerComplete extends MenuScene {
     constructor(idx, pickP1) {
       super();
+      this.touchBack = false;
       this.music = null;
       this.dim = 0.85;
       this.tw = TOWERS[idx];

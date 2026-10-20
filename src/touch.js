@@ -19,7 +19,7 @@ let viewRef = null;
 
 function toVirtual(e) {
   const v = viewRef;
-  return [((e.clientX * v.dpr) - v.ox) / v.scale, ((e.clientY * v.dpr) - v.oy) / v.scale];
+  return [(((e.clientX - (v.left || 0)) * v.dpr) - v.ox) / v.scale, (((e.clientY - (v.top || 0)) * v.dpr) - v.oy) / v.scale];
 }
 
 function visible() {

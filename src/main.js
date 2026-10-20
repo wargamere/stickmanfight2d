@@ -1,6 +1,7 @@
 // Boot, canvas scaling, fixed-timestep loop and scene management.
 
-import { initInput, updateInputs, endInputFrame, setPointerMapper, pointer } from './input.js';
+import { initInput, updateInputs, endInputFrame, setPointerMapper, pointer, menu } from './input.js';
+import { TOUCH_BACK, drawTouchBack, inRect } from './ui.js';
 import { audio } from './audio.js';
 import { loadSave, persist } from './save.js';
 import { createScenes } from './scenes.js';
@@ -9,15 +10,19 @@ import { initTouch, drawTouch } from './touch.js';
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d', { alpha: false });
 
-export const view = { w: 1280, h: 720, scale: 1, ox: 0, oy: 0, dpr: 1, cw: 0, ch: 0 };
+export const view = { w: 1280, h: 720, scale: 1, ox: 0, oy: 0, dpr: 1, cw: 0, ch: 0, left: 0, top: 0 };
 
 let maxPixels = 2560 * 1440;
 function resize() {
   let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const box = canvas.getBoundingClientRect();
+  const bw = Math.max(1, box.width || window.innerWidth), bh = Math.max(1, box.height || window.innerHeight);
+  view.left = box.left || 0;
+  view.top = box.top || 0;
   // cap the backing store so huge/retina screens don't melt weaker GPUs
-  while (dpr > 0.5 && window.innerWidth * window.innerHeight * dpr * dpr > maxPixels) dpr *= 0.9;
-  const cw = Math.floor(window.innerWidth * dpr);
-  const ch = Math.floor(window.innerHeight * dpr);
+  while (dpr > 0.5 && bw * bh * dpr * dpr > maxPixels) dpr *= 0.9;
+  const cw = Math.floor(bw * dpr);
+  const ch = Math.floor(bh * dpr);
   canvas.width = cw;
   canvas.height = ch;
   view.dpr = dpr;
@@ -32,7 +37,8 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
-setPointerMapper((cx, cy) => [((cx * view.dpr) - view.ox) / view.scale, ((cy * view.dpr) - view.oy) / view.scale]);
+setPointerMapper((cx, cy) => [(((cx - view.left) * view.dpr) - view.ox) / view.scale, (((cy - view.top) * view.dpr) - view.oy) / view.scale]);
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => resize()).observe(canvas);
 initInput(canvas);
 
 // ---------------------------------------------------------------------------
@@ -106,6 +112,11 @@ function tick() {
       game.fadeDir = 0;
     }
   }
+  const touchBack = pointer.isTouch && game.scene && !game.scene.wantsTouch && game.scene.touchBack !== false;
+  if (touchBack && pointer.pressed && inRect(pointer.x, pointer.y, TOUCH_BACK)) {
+    menu.fired.back = true;
+    pointer.pressed = false;
+  }
   if (game.scene && game.fadeDir <= 0) game.scene.update(view);
   game.toasts?.update();
   endInputFrame();
@@ -121,6 +132,7 @@ function draw() {
   ctx.rect(0, 0, view.w, view.h);
   ctx.clip();
   if (game.scene) game.scene.draw(ctx, view);
+  if (pointer.isTouch && game.scene && !game.scene.wantsTouch && game.scene.touchBack !== false) drawTouchBack(ctx);
   drawTouch(ctx, view, game);
   if (game.fade > 0) {
     ctx.fillStyle = `rgba(7,6,13,${game.fade})`;
@@ -128,6 +140,20 @@ function draw() {
   }
   game.toasts?.draw(ctx, view);
   ctx.restore();
+  // portrait phones: the game is letterboxed, so ask for landscape
+  if (view.ch > view.cw * 1.1) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const s = Math.min(view.cw / 420, 3);
+    const y = Math.max(40 * s, view.oy / 2);
+    ctx.fillStyle = '#ffd23f';
+    ctx.font = `${Math.round(22 * s)}px "Russo One", "Arial Black", sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('↻  ROTATE TO LANDSCAPE', view.cw / 2, y);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = `${Math.round(15 * s)}px "Rajdhani", sans-serif`;
+    ctx.fillText('Stickman Fight 2D plays best sideways', view.cw / 2, y + 30 * s);
+  }
 }
 
 // Auto performance mode: if the browser can't hold ~40fps for a few seconds

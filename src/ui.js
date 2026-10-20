@@ -66,6 +66,7 @@ export function inRect(px, py, r) {
 
 // Screen title with underline swoosh
 export function title(ctx, str, x, y, { size = 54, color = '#fff', align = 'left', sub = '' } = {}) {
+  if (pointer.isTouch && align === 'left' && x < 120) x += 58; // room for the touch back button
   text(ctx, str, x, y, { size, font: FONT_BIG, color, align, stroke: '#000', sw: 7, shadow: 'rgba(0,0,0,0.5)' });
   ctx.font = `${size}px ${FONT_BIG}`;
   const w = ctx.measureText(str).width;
@@ -83,6 +84,7 @@ export function title(ctx, str, x, y, { size = 54, color = '#fff', align = 'left
 
 // Hint bar at the bottom: [['ENTER','Select'], ['ESC','Back']]
 export function hints(ctx, view, items) {
+  if (pointer.isTouch) return; // touch players tap; key hints would just clutter
   let x = view.w - 30;
   ctx.save();
   for (let i = items.length - 1; i >= 0; i--) {
@@ -397,3 +399,27 @@ export function wrapText(ctx, str, x, y, maxW, lineH, opts = {}) {
 }
 
 export { clamp, lerp, ease, rgba, shade };
+
+// Round "back" button for touch players (menus have no Esc key on a phone)
+export const TOUCH_BACK = { x: 14, y: 22, w: 50, h: 50 };
+export function drawTouchBack(ctx) {
+  const r = TOUCH_BACK;
+  ctx.save();
+  ctx.fillStyle = 'rgba(10,9,20,0.85)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(r.x + r.w * 0.58, r.y + r.h * 0.3);
+  ctx.lineTo(r.x + r.w * 0.38, r.y + r.h * 0.5);
+  ctx.lineTo(r.x + r.w * 0.58, r.y + r.h * 0.7);
+  ctx.stroke();
+  ctx.restore();
+}

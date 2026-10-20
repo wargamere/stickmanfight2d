@@ -28,3 +28,16 @@ html = html.replace(tag, () => `<script>${js}</script>`);
 await mkdir(out, { recursive: true });
 await writeFile(join(out, 'index.html'), html);
 console.log(`dist/index.html  ${(html.length / 1024).toFixed(1)} KiB`);
+
+// Embeddable variant (no document skeleton) for hosts that supply their own
+// <html>/<head>/<body>, e.g. a claude.ai Artifact.
+const head = html.slice(html.indexOf('<head>') + 6, html.indexOf('</head>'));
+const body = html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'));
+const keepHead = head
+  .split('\n')
+  .filter((l) => !/<meta charset|name="viewport"/.test(l))
+  .join('\n');
+const titleLine = keepHead.match(/<title>.*<\/title>/)[0];
+const embed = `${titleLine}\n${keepHead.replace(titleLine, '')}\n${body}`;
+await writeFile(join(out, 'embed.html'), embed);
+console.log(`dist/embed.html  ${(embed.length / 1024).toFixed(1)} KiB`);
