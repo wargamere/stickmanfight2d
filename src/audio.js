@@ -16,7 +16,11 @@
 //   sfx voices ──► sfxBus ◄── sfx reverb return
 //        └──────► sfx reverb send ──┘
 //   music racks ─► musicIn ─► pause lowpass ─► pause duck ─► musicBus ─┐
-//   sfxBus ─────────────────────────────────────────────────────────────┼► master ─► limiter ─► out
+//   sfxBus ─────────────────────────────────────────────────────────────┴► master
+//   master ─► compressor (limiter-ish) ─► safety soft clipper ─► destination
+//
+// SFX levels are calibrated offline (K-weighted short-term loudness, peaks
+// capped near -6 dBFS) and baked into the LEVELS / GLUE tables.
 //
 // The module is import-safe in Node: nothing touches `window` or creates an
 // AudioContext until `audio.unlock()` is called.
@@ -47,6 +51,18 @@ function mulberry32(seed) {
   };
 }
 const hash01 = (n) => mulberry32(n)();
+
+/** Disconnects every node in the list (ignoring ones already disconnected) and empties it. */
+function disconnectAll(nodes) {
+  for (const n of nodes) {
+    try {
+      n.disconnect();
+    } catch (e) {
+      /* already disconnected */
+    }
+  }
+  nodes.length = 0;
+}
 
 // =============================================================================
 // Shared buffers (cached per context): noise, reverb impulses, shaper curves
@@ -199,6 +215,24 @@ function metalBuffer(ac) {
   }
   cache.set('metal', buf);
   return buf;
+}
+
+/**
+ * Final safety clipper: transparent below 0.9, approaches 1.0 asymptotically.
+ * Fed through a 0.5 pre-gain, so the curve's [-1, 1] domain covers inputs up to +-2.
+ */
+let safetyCurveCached = null;
+function safetyCurve() {
+  if (safetyCurveCached) return safetyCurveCached;
+  const n = 4096;
+  const c = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const u = ((i / (n - 1)) * 2 - 1) * 2;
+    const a = Math.abs(u);
+    c[i] = Math.sign(u) * (a < 0.9 ? a : 0.9 + 0.1 * Math.tanh((a - 0.9) / 0.1));
+  }
+  safetyCurveCached = c;
+  return c;
 }
 
 const curveCache = new Map();
@@ -560,14 +594,7 @@ class Voice {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
-    for (const n of this.nodes) {
-      try {
-        n.disconnect();
-      } catch (e) {
-        /* already disconnected */
-      }
-    }
-    this.nodes.length = 0;
+    disconnectAll(this.nodes);
     this.srcs.length = 0;
     this.last = null;
   }
@@ -580,27 +607,27 @@ class Voice {
 // Per-sfx output gain, calibrated offline (K-weighted short-term loudness,
 // peaks capped near -6 dBFS) so every effect lands at a consistent level.
 const LEVELS = {
-  hitLight: 0.499, hitMedium: 0.499, hitHeavy: 0.476, hitSlash: 0.509, block: 0.5, parry: 0.425,
-  guardBreak: 0.494, whoosh: 1.736, whooshHeavy: 1.04, swingBlade: 2.128, jump: 1.299,
-  doubleJump: 0.52, land: 0.46, dash: 2.442, step: 0.488, throw: 0.475, wallBounce: 0.49,
-  groundBounce: 0.456, knockdown: 0.427, breaker: 0.432, counter: 0.487, ko: 0.377, perfect: 0.903,
-  fire: 0.776, fireball: 0.581, explosion: 0.402, ice: 1.2, shatter: 0.495, shock: 0.342,
-  thunder: 0.576, shadow: 0.474, teleport: 1.85, energy: 0.503, beam: 0.643, charge: 0.824,
-  heal: 1.157, poison: 1.276, chain: 1.52, metal: 0.534, ground: 0.376, rock: 0.562, wind: 1.829,
-  laser: 1.012, mine: 0.611, ultimateStart: 0.455, ultimateHit: 0.35, uiMove: 0.677, uiSelect: 0.316,
-  uiBack: 0.345, uiError: 0.377, coin: 0.485, unlock: 0.531, achievement: 0.466,
-  announceRound: 0.418, announceFight: 0.449, countdown: 0.882, timeUp: 0.504, victory: 0.405,
+  hitLight: 0.497, hitMedium: 0.494, hitHeavy: 0.468, hitSlash: 0.458, block: 0.499, parry: 0.426,
+  guardBreak: 0.478, whoosh: 1.206, whooshHeavy: 0.943, swingBlade: 0.894, jump: 1.346,
+  doubleJump: 0.514, land: 0.459, dash: 0.957, step: 0.473, throw: 0.482, wallBounce: 0.479,
+  groundBounce: 0.473, knockdown: 0.426, breaker: 0.377, counter: 0.451, ko: 0.371, perfect: 0.867,
+  fire: 0.624, fireball: 0.545, explosion: 0.4, ice: 1.189, shatter: 0.438, shock: 0.333,
+  thunder: 0.565, shadow: 0.473, teleport: 1.707, energy: 0.445, beam: 0.612, charge: 0.807,
+  heal: 1.094, poison: 1.241, chain: 1.581, metal: 0.533, ground: 0.373, rock: 0.551, wind: 1.739,
+  laser: 1.012, mine: 0.611, ultimateStart: 0.399, ultimateHit: 0.347, uiMove: 0.677,
+  uiSelect: 0.316, uiBack: 0.345, uiError: 0.377, coin: 0.485, unlock: 0.531, achievement: 0.463,
+  announceRound: 0.4, announceFight: 0.394, countdown: 0.871, timeUp: 0.504, victory: 0.401,
   defeat: 0.485,
 };
 
 // Pre-gain into the per-voice tanh soft limiter ("glue") for impact sounds.
 const GLUE = {
-  hitLight: 0.709, hitMedium: 0.595, hitHeavy: 0.475, hitSlash: 0.661, block: 0.755,
-  guardBreak: 0.407, doubleJump: 0.782, land: 0.717, throw: 0.464, wallBounce: 0.57,
-  groundBounce: 0.579, knockdown: 0.793, breaker: 0.655, counter: 0.616, ko: 0.225, fire: 2.145,
-  fireball: 1.054, explosion: 0.647, shatter: 0.682, shock: 0.536, thunder: 0.678, shadow: 0.561,
-  energy: 0.628, ground: 0.61, rock: 1.002, ultimateStart: 0.442, ultimateHit: 0.259,
-  announceFight: 0.425,
+  hitLight: 0.645, hitMedium: 0.653, hitHeavy: 0.466, hitSlash: 0.55, block: 0.782,
+  guardBreak: 0.412, doubleJump: 0.734, land: 0.688, throw: 0.46, wallBounce: 0.499,
+  groundBounce: 0.501, knockdown: 0.738, breaker: 0.626, counter: 0.57, ko: 0.237, fire: 2.191,
+  fireball: 0.949, explosion: 0.49, shatter: 0.571, shock: 0.514, thunder: 0.735, shadow: 0.592,
+  energy: 0.546, ground: 0.516, rock: 1.006, ultimateStart: 0.477, ultimateHit: 0.255,
+  announceFight: 0.384,
 };
 
 const SFX = {};
@@ -616,8 +643,8 @@ function def(name, fn, { vary = 0.04 } = {}) {
 
 /**
  * Layered impact used by most hits. `s` = size (0 light .. 1 huge).
- * Click transient + band-passed crack + pitch-dropping saturated thump +
- * mid punch + low noise body (+ sub boom when big).
+ * Click transient + bright smack + band-passed crack + pitch-dropping
+ * saturated thump + mid punch + low noise body (+ sub boom when big).
  */
 function impact(v, at, s, bright = 1) {
   // transient click
@@ -680,15 +707,15 @@ def('block', (v) => {
 });
 
 def('parry', (v) => {
-  v.nz({ d: 0.006, vol: 0.6, filt: { type: 'highpass', f: 3500 } }); // contact click
-  v.nz({ d: 0.05, vol: 0.35, filt: { type: 'bandpass', f: 5000, q: 1.5 } }); // scrape
+  v.nz({ d: 0.006, vol: 0.3, filt: { type: 'highpass', f: 3500 } }); // contact click
+  v.nz({ d: 0.05, vol: 0.18, filt: { type: 'bandpass', f: 5000, q: 1.5 } }); // scrape
   // the "ting": bell partials with a tiny upward chirp into pitch
   v.ring({ f: 1568, ratios: [1, 2.0, 2.76, 4.07, 5.4], d: 0.95, vol: 0.5, chirp: 0.97, send: 0.25 });
   v.fm({ f: 2349, ratio: 3.5, index: 2.5, index2: 0.1, d: 0.6, vol: 0.22, send: 0.25 });
   // shimmer: two slightly detuned high sines beating against each other
   v.tone({ at: 0.01, f: 3136, a: 0.01, d: 0.75, vol: 0.12, vib: [9, 15], send: 0.3 });
   v.tone({ at: 0.01, f: 3146, a: 0.01, d: 0.75, vol: 0.12, send: 0.3 });
-  v.nz({ at: 0.005, a: 0.02, d: 0.3, vol: 0.1, filt: { type: 'highpass', f: 9000 }, send: 0.3 });
+  v.nz({ at: 0.005, a: 0.02, d: 0.3, vol: 0.05, filt: { type: 'highpass', f: 9000 }, send: 0.3 });
 });
 
 def('guardBreak', (v) => {
@@ -719,7 +746,7 @@ def('swingBlade', (v) => {
 def('jump', (v) => {
   v.nz({ a: 0.008, d: 0.09, vol: 0.6, filt: { type: 'bandpass', f: 800, f2: 2200, glide: 0.08, q: 1.2 } });
   v.tone({ type: 'triangle', f: 280, f2: 560, glide: 0.07, a: 0.003, d: 0.08, vol: 0.35 });
-  v.nz({ kind: 'pink', d: 0.04, vol: 0.4, filt: { type: 'lowpass', f: 400 } }); // push-off scuff
+  v.nz({ kind: 'pink', d: 0.04, vol: 0.25, filt: { type: 'lowpass', f: 400 } }); // push-off scuff
 });
 
 def('doubleJump', (v) => {
@@ -794,7 +821,7 @@ def('breaker', (v) => {
 
 def('counter', (v) => {
   impact(v, 0, 0.35);
-  v.nz({ d: 0.006, vol: 0.7, filt: { type: 'highpass', f: 3000 } });
+  v.nz({ d: 0.006, vol: 0.3, filt: { type: 'highpass', f: 3000 } });
   v.tone({ type: 'square', f: 1760, d: 0.2, vol: 0.12, filt: { type: 'lowpass', f: 5000 }, send: 0.2 });
   v.tone({ type: 'sawtooth', f: 2637, d: 0.16, vol: 0.08, filt: { type: 'lowpass', f: 6000 }, send: 0.2 });
   v.fm({ f: 1318, ratio: 2.01, index: 3, index2: 0.2, d: 0.32, vol: 0.25, send: 0.2 });
@@ -844,18 +871,18 @@ def('explosion', (v) => {
 });
 
 def('ice', (v) => {
-  v.nz({ d: 0.03, vol: 0.5, filt: { type: 'highpass', f: 4500 } });
-  v.crackle({ dur: 0.08, count: 5, fmin: 3000, fmax: 9000, d: 0.006, vol: 0.5, q: 2 });
+  v.nz({ d: 0.03, vol: 0.2, filt: { type: 'highpass', f: 4500 } });
+  v.crackle({ dur: 0.08, count: 5, fmin: 3000, fmax: 9000, d: 0.006, vol: 0.25, q: 2 });
   const notes = [2637, 3136, 3520, 4186, 4699, 5274];
   for (let i = 0; i < 6; i++) {
     v.fm({ at: i * 0.035 + rnd(0, 0.015), f: pick(notes), ratio: 2.76, index: 1.2, index2: 0.05, d: 0.35, vol: 0.18, send: 0.35, pan: rnd(-0.4, 0.4) });
   }
   v.ring({ f: 1900, ratios: [1, 1.71, 2.53, 3.4], d: 0.6, vol: 0.12, send: 0.3 }); // glassy body
-  v.nz({ a: 0.05, d: 0.5, vol: 0.1, filt: { type: 'bandpass', f: 7000, q: 2 }, send: 0.4 }); // frost hiss
+  v.nz({ a: 0.05, d: 0.5, vol: 0.05, filt: { type: 'bandpass', f: 7000, q: 2 }, send: 0.4 }); // frost hiss
 });
 
 def('shatter', (v) => {
-  v.nz({ d: 0.12, vol: 0.8, filt: { type: 'highpass', f: 1800 }, send: 0.2 });
+  v.nz({ d: 0.12, vol: 0.5, filt: { type: 'highpass', f: 1800 }, send: 0.2 });
   v.tone({ f: 200, f2: 70, glide: 0.08, d: 0.15, vol: 0.6 });
   v.crackle({ dur: 0.2, count: 16, fmin: 3000, fmax: 9000, d: 0.008, vol: 0.6, q: 3 });
   // shards tinkling down, dense at first
@@ -881,7 +908,7 @@ def('shock', (v) => {
 });
 
 def('thunder', (v) => {
-  v.nz({ d: 0.02, vol: 1, filt: { type: 'highpass', f: 1200 } });
+  v.nz({ d: 0.02, vol: 0.5, filt: { type: 'highpass', f: 1200 } });
   v.crackle({ dur: 0.25, count: 18, fmin: 1500, fmax: 7000, d: 0.012, vol: 0.8, q: 1 });
   v.nz({ a: 0.002, d: 0.3, vol: 0.7, filt: { type: 'bandpass', f: 2500, f2: 600, glide: 0.25, q: 0.6 }, send: 0.5 });
   // rolling rumble: overlapping swells
@@ -1093,8 +1120,8 @@ def('announceRound', (v) => {
   // deep drum hit
   v.tone({ f: 130, f2: 60, glide: 0.07, a: 0.002, d: 1.0, vol: 1, dist: 1.6, send: 0.4 });
   v.tone({ type: 'triangle', f: 210, f2: 100, glide: 0.05, d: 0.25, vol: 0.45 });
-  v.nz({ kind: 'pink', d: 0.18, vol: 0.6, filt: { type: 'lowpass', f: 700, q: 1.2 }, send: 0.4 });
-  v.nz({ d: 0.012, vol: 0.4, filt: { type: 'bandpass', f: 1800 } });
+  v.nz({ kind: 'pink', d: 0.18, vol: 0.4, filt: { type: 'lowpass', f: 700, q: 1.2 }, send: 0.4 });
+  v.nz({ d: 0.012, vol: 0.2, filt: { type: 'bandpass', f: 1800 } });
   // gong swell
   v.fm({ f: 98, ratio: 1.47, index: 3.5, index2: 0.6, a: 0.25, aCurve: 'exp', d: 1.6, vol: 0.35, send: 0.6 });
   v.ring({ f: 196, ratios: [1, 1.48, 2.05, 2.69, 3.42], a: 0.3, d: 1.6, vol: 0.25, send: 0.6 });
@@ -1114,7 +1141,7 @@ def('announceFight', (v) => {
 }, { vary: 0 });
 
 def('countdown', (v) => {
-  v.nz({ d: 0.004, vol: 0.4, filt: { type: 'highpass', f: 3000 } });
+  v.nz({ d: 0.004, vol: 0.2, filt: { type: 'highpass', f: 3000 } });
   v.tone({ f: 1046, d: 0.1, vol: 0.5 });
   v.tone({ type: 'square', f: 2093, d: 0.04, vol: 0.08, filt: { type: 'lowpass', f: 5000 } });
 }, { vary: 0 });
@@ -1133,9 +1160,9 @@ def('victory', (v) => {
   // drum hits and a cymbal on the last chord
   for (const at of [0, 0.36, 0.96]) {
     v.tone({ at, f: 150, f2: 50, glide: 0.06, d: 0.3, vol: 0.6 });
-    v.nz({ at, d: 0.18, vol: 0.35, filt: { type: 'highpass', f: 1200 } });
+    v.nz({ at, d: 0.18, vol: 0.15, filt: { type: 'highpass', f: 1200 } });
   }
-  v.nz({ at: 0.96, d: 1.2, vol: 0.25, filt: { type: 'highpass', f: 5000 }, send: 0.4 });
+  v.nz({ at: 0.96, d: 1.2, vol: 0.12, filt: { type: 'highpass', f: 5000 }, send: 0.4 });
   v.ring({ at: 0.96, f: mtof(96), ratios: [1, 2, 3], d: 0.9, vol: 0.05, send: 0.4 });
 }, { vary: 0 });
 
@@ -1274,7 +1301,7 @@ const INST = {
     v.done();
   },
 
-  /** Industrial metal hit: 808-style square cluster + FM anvil ping. */
+  /** Industrial metal hit: pre-rendered 808-style square cluster + FM anvil ping. */
   metal(r, t, vel = 0.25, f = 540, d = 0.22) {
     const v = r.voice(t, r.drums);
     const src = v.reg(r.ac.createBufferSource());
@@ -2062,16 +2089,7 @@ function createRack(ac, dest, track, intensity = 0) {
   };
   r.voice = (t, dest2) => new Voice(ac, dest2, t, { reverb: r.revIn, delay: r.dlyIn, oversample: 'none' });
   r.rand = (bar, s, salt = 0) => hash01((r.seed * 100003 + bar * 1009 + s * 31 + salt * 7) | 0);
-  r.dispose = () => {
-    for (const n of nodes) {
-      try {
-        n.disconnect();
-      } catch (e) {
-        /* already gone */
-      }
-    }
-    nodes.length = 0;
-  };
+  r.dispose = () => disconnectAll(nodes);
   return r;
 }
 
@@ -2141,7 +2159,15 @@ function buildGraph(ac) {
   lim.ratio.value = 16;
   lim.attack.value = 0.002;
   lim.release.value = 0.15;
-  lim.connect(ac.destination);
+  // The compressor adds automatic makeup gain and can overshoot on sharp
+  // transients, so a transparent soft clipper guarantees the output never clips.
+  const clipPre = g(0.5);
+  const clip = ac.createWaveShaper();
+  clip.curve = safetyCurve();
+  clip.oversample = 'none';
+  lim.connect(clipPre);
+  clipPre.connect(clip);
+  clip.connect(ac.destination);
   S.limiter = lim;
   S.master = g(S.vol.master);
   S.master.connect(lim);

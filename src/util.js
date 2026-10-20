@@ -128,3 +128,17 @@ export function shuffle(arr, rng = Math.random) {
   }
   return a;
 }
+
+// Perceived luminance 0..1
+export function luminance(hex) {
+  const [r, g, b] = hexToRgb(hex);
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+// A color guaranteed to read on dark UI: the accent, lightened if too dark
+export function readable(hex) {
+  if (!hex || !hex.startsWith('#')) return hex || '#ffffff';
+  if (luminance(hex) >= 0.38) return hex;
+  const [r, g, b] = hexToRgb(hex);
+  const up = (c) => Math.round(c + (255 - c) * 0.55).toString(16).padStart(2, '0');
+  return `#${up(r)}${up(g)}${up(b)}`;
+}

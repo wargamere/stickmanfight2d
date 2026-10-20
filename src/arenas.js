@@ -1,9 +1,15 @@
 // Stickman Fight 2D — procedural arena backgrounds.
 //
-// Ten animated, parallax stage backdrops drawn entirely with the Canvas 2D API.
-// Static / complex silhouettes are pre-rendered once into offscreen canvases
-// (at 2x resolution on 'high' quality) and blitted every frame; only cheap
+// Ten animated, parallax stage backdrops drawn entirely with the Canvas 2D API
+// (no image assets). Static / complex silhouettes are pre-rendered once into
+// offscreen canvases in createArenaState (2x for crisp near-field sprites on
+// 'high', lower for soft distant scenery) and blitted every frame; only cheap
 // animated details (particles, glows, swinging props) are drawn live.
+//
+// Public API (see bottom of file):
+//   ARENAS, createArenaState(id, {quality, seed}), updateArena(state, dt),
+//   drawArenaBack(ctx, state, cam, view), drawArenaFront(ctx, state, cam, view),
+//   arenaImpact(state, x, y, power), drawArenaPreview(ctx, id, x, y, w, h, t)
 //
 // Coordinate contract (see game camera):
 //   world -> screen: sx = view.w/2 + (wx - cam.x) * cam.zoom
@@ -17,6 +23,7 @@
 
 const TAU = Math.PI * 2;
 const FLOOR_H = 800;       // distance (floor units) from ground line to the floor's vanishing point
+const PAD = 48;            // screen-space overdraw margin so caller-applied screen shake never reveals edges
 const FIELD_M = 90;        // margin around the screen for wrapped ambient particle fields
 const FIELD_W = 1710 + FIELD_M * 2;
 const FIELD_H = 720 + FIELD_M * 2;
@@ -117,7 +124,7 @@ function createCanvas(w, h) {
       return c;
     }
     if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(w, h);
-  } catch (e) { /* no canvas support (e.g. Node) */ }
+  } catch { /* no canvas support (e.g. Node) */ }
   return null;
 }
 
@@ -245,10 +252,10 @@ function layer(ctx, cam, view, p) {
   ctx.translate(-cam.x * p, -cam.y * p);
   return {
     p, z,
-    x0: cam.x * p - view.w / 2 / z,
-    x1: cam.x * p + view.w / 2 / z,
-    y0: cam.y * p - (view.h * 0.8) / z,
-    y1: cam.y * p + (view.h * 0.2) / z,
+    x0: cam.x * p - (view.w / 2 + PAD) / z,
+    x1: cam.x * p + (view.w / 2 + PAD) / z,
+    y0: cam.y * p - (view.h * 0.8 + PAD) / z,
+    y1: cam.y * p + (view.h * 0.2 + PAD) / z,
   };
 }
 // Screen position of a layer point (for reflections / glows drawn in screen space).
@@ -274,18 +281,18 @@ function setLocal(ctx, m, x, y, rot, sx, sy) {
 // point FLOOR_H above the ground line at screen centre.
 function floorView(cam, view) {
   const z = cam.zoom, gy = view.h * 0.8 - cam.y * z;
-  return { z, gy, cx: view.w / 2, camX: cam.x, rMax: Math.max(0, (view.h - gy) / z + 1), w: view.w, h: view.h };
+  return { z, gy, cx: view.w / 2, camX: cam.x, rMax: Math.max(0, (view.h + PAD - gy) / z + 1), w: view.w, h: view.h };
 }
 const fX = (F, u, r) => F.cx + (u - F.camX) * F.z * (1 + r / FLOOR_H);
 const fY = (F, r) => F.gy + r * F.z;
-const fU0 = (F, r) => F.camX - F.cx / (F.z * (1 + r / FLOOR_H));
-const fU1 = (F, r) => F.camX + F.cx / (F.z * (1 + r / FLOOR_H));
+const fU0 = (F, r) => F.camX - (F.cx + PAD) / (F.z * (1 + r / FLOOR_H));
+const fU1 = (F, r) => F.camX + (F.cx + PAD) / (F.z * (1 + r / FLOOR_H));
 
 // Fill the floor band with a vertical gradient (stops are in floor depth units 0..240).
 function floorBase(ctx, F, stops) {
-  if (F.gy >= F.h) return;
+  if (F.gy >= F.h + PAD) return;
   ctx.fillStyle = lin(ctx, 0, F.gy, 0, F.gy + 240 * F.z, stops);
-  ctx.fillRect(-2, F.gy, F.w + 4, F.h - F.gy + 2);
+  ctx.fillRect(-PAD, F.gy, F.w + 2 * PAD, F.h - F.gy + PAD);
 }
 // Non-perspective texture overlay on the floor (for grain/noise detail).
 function floorTexture(ctx, F, t, alpha = 1, op = 'source-over') {
@@ -297,7 +304,7 @@ function floorTexture(ctx, F, t, alpha = 1, op = 'source-over') {
   ctx.translate(F.cx, F.gy);
   ctx.scale(fz, F.z);
   ctx.translate(-F.camX, 0);
-  const b = { x0: F.camX - F.cx / fz, x1: F.camX + F.cx / fz };
+  const b = { x0: F.camX - (F.cx + PAD) / fz, x1: F.camX + (F.cx + PAD) / fz };
   drawTile(ctx, b, t, 0);
   ctx.restore();
 }
@@ -337,12 +344,12 @@ function vignette(ctx, view, rgb, strength, inner = 0.35, cy = 0.5) {
   g.addColorStop(0.6, `rgba(${rgb},${strength * 0.45})`);
   g.addColorStop(1, `rgba(${rgb},${strength})`);
   ctx.fillStyle = g;
-  ctx.fillRect(0, 0, view.w, view.h);
+  ctx.fillRect(-PAD, -PAD, view.w + 2 * PAD, view.h + 2 * PAD);
 }
 function screenGrad(ctx, view, stops, op = 'source-over') {
   ctx.globalCompositeOperation = op;
   ctx.fillStyle = lin(ctx, 0, 0, 0, view.h, stops);
-  ctx.fillRect(0, 0, view.w, view.h);
+  ctx.fillRect(-PAD, -PAD, view.w + 2 * PAD, view.h + 2 * PAD);
   ctx.globalCompositeOperation = 'source-over';
 }
 // Sky gradient filled across a near-static layer (stops: [offset, color] between y0..y1).
@@ -565,6 +572,21 @@ function kickPendulums(list, x, power, reach, strength, period = 0) {
     const dx = period ? mod(o.x - x + period / 2, period) - period / 2 : o.x - x;
     const f = power * strength / (1 + Math.abs(dx) / reach);
     o.av += (dx >= 0 ? -1 : 1) * f * (0.7 + 0.3 * Math.sin(o.ph * 7));
+  }
+}
+
+// Foreground silhouettes hugging the bottom screen edge: anchored to the bottom
+// of the screen, sliding horizontally faster than the world (p > 1). Sprites are
+// anchored at their bottom centre; o.x is a screen position at cam.x = 0.
+function drawFore(ctx, cam, view, list, p = 1.35, period = 2600) {
+  const z = 0.85 + (cam.zoom - 1) * 0.4;
+  for (const o of list) {
+    const s = o.s;
+    if (!s) continue;
+    const sc = z * (o.sc || 1);
+    const x = mod(o.x - cam.x * p * cam.zoom + 400, period) - 400;
+    if (x < -s.w * sc || x > view.w + s.w * sc) continue;
+    ctx.drawImage(s.c, x - s.ax * sc, view.h + (o.dy || 0) * sc - s.ay * sc, s.w * sc, s.h * sc);
   }
 }
 
@@ -1166,7 +1188,7 @@ IMPL.dojo = {
       ctx.beginPath();
       for (let k = 1; k < rows.length && rows[k] < F.rMax; k++) {
         const y = fY(F, rows[k]);
-        ctx.moveTo(0, y); ctx.lineTo(view.w, y);
+        ctx.moveTo(-PAD, y); ctx.lineTo(view.w + PAD, y);
       }
       for (let k = 0; k < rows.length - 1 && rows[k] < F.rMax; k++) {
         const r0 = rows[k], r1 = rows[k + 1];
@@ -1182,7 +1204,7 @@ IMPL.dojo = {
       ctx.beginPath();
       for (let k = 1; k < rows.length && rows[k] < F.rMax; k++) {
         const y = fY(F, rows[k]) + 1.2;
-        ctx.moveTo(0, y); ctx.lineTo(view.w, y);
+        ctx.moveTo(-PAD, y); ctx.lineTo(view.w + PAD, y);
       }
       ctx.stroke();
       // sunset sheen + lantern / gate reflections
@@ -1203,15 +1225,15 @@ IMPL.dojo = {
         });
       }
       ctx.fillStyle = 'rgba(255,205,150,0.55)';
-      ctx.fillRect(0, F.gy - 0.5, view.w, 1.5 * F.z);
+      ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5 * F.z);
       ctx.fillStyle = lin(ctx, 0, F.gy, 0, view.h, [[0, 'rgba(30,10,20,0)'], [1, 'rgba(30,10,20,0.35)']]);
-      ctx.fillRect(0, F.gy, view.w, view.h - F.gy);
+      ctx.fillRect(-PAD, F.gy, view.w + 2 * PAD, view.h - F.gy + PAD);
     }
   },
 
   front(ctx, S, cam, view) {
     drawSpriteField(ctx, S.petalsF, cam, view, S.petalSpr, S.t, 1.6);
-    screenGrad(ctx, view, [[0, 'rgba(255,140,80,0.06)'], [0.5, 'rgba(255,140,80,0)'], [1, 'rgba(60,10,40,0.12)']]);
+    if (S.hi) screenGrad(ctx, view, [[0, 'rgba(255,140,80,0.06)'], [0.5, 'rgba(255,140,80,0)'], [1, 'rgba(60,10,40,0.12)']]);
     vignette(ctx, view, '40,10,40', 0.5);
   },
 
@@ -1670,7 +1692,7 @@ IMPL.rooftop = {
       // mirrored skyline on the wet surface
       ctx.save();
       ctx.beginPath();
-      ctx.rect(0, F.gy, view.w, view.h - F.gy);
+      ctx.rect(-PAD, F.gy, view.w + 2 * PAD, view.h - F.gy + PAD);
       ctx.clip();
       for (const [p, a] of [[0.22, 0.3], [0.42, 0.24]]) {
         ctx.save();
@@ -1687,14 +1709,14 @@ IMPL.rooftop = {
       ctx.restore();
       ctx.globalAlpha = 1;
       ctx.fillStyle = lin(ctx, 0, F.gy, 0, F.gy + 200 * F.z, [[0, 'rgba(22,18,38,0)'], [1, 'rgba(14,11,24,0.85)']]);
-      ctx.fillRect(0, F.gy, view.w, view.h - F.gy);
+      ctx.fillRect(-PAD, F.gy, view.w + 2 * PAD, view.h - F.gy + PAD);
       floorTexture(ctx, F, S.noise, 1);
       ctx.strokeStyle = 'rgba(0,0,0,0.35)';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       floorRays(ctx, F, 220, 40);
       for (const r of [38, 110, 220]) {
-        if (r < F.rMax) { ctx.moveTo(0, fY(F, r)); ctx.lineTo(view.w, fY(F, r)); }
+        if (r < F.rMax) { ctx.moveTo(-PAD, fY(F, r)); ctx.lineTo(view.w + PAD, fY(F, r)); }
       }
       ctx.stroke();
       ctx.globalCompositeOperation = 'lighter';
@@ -1742,7 +1764,7 @@ IMPL.rooftop = {
       }
       ctx.stroke();
       ctx.fillStyle = 'rgba(120,200,255,0.35)';
-      ctx.fillRect(0, F.gy - 0.5, view.w, 1.5);
+      ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5);
     }
   },
 
@@ -1757,7 +1779,7 @@ IMPL.rooftop = {
       ctx.lineTo(_fp[0] - l * 0.08, _fp[1] + l);
     }
     ctx.stroke();
-    screenGrad(ctx, view, [[0, 'rgba(20,10,60,0.15)'], [0.6, 'rgba(20,10,60,0)'], [1, 'rgba(60,0,60,0.18)']]);
+    if (S.hi) screenGrad(ctx, view, [[0, 'rgba(20,10,60,0.15)'], [0.6, 'rgba(20,10,60,0)'], [1, 'rgba(60,0,60,0.18)']]);
     vignette(ctx, view, '5,0,20', 0.6);
   },
 
@@ -1942,6 +1964,21 @@ IMPL.volcano = {
     S.embersF = makeField(S.frng, S.n(16), (p, r) => { p.d = r.range(1.2, 1.5); p.s = r.range(5, 9); p.vx = r.range(-10, 30); p.vy = -r.range(80, 150); p.tw = r.range(3, 8); });
     S.ash = makeField(S.frng, S.n(40), (p, r) => { p.d = r.range(0.4, 1); p.s = r.range(1, 2.2); p.vx = r.range(10, 30); p.vy = r.range(15, 35); });
     S.shimmer = Array.from({ length: S.hi ? 7 : 3 }, () => ({ x: S.frng.range(-900, 900), y: S.frng.range(-300, 0), s: S.frng.range(140, 260), sp: S.frng.range(18, 35) }));
+    const rock = (w, h) => makeSprite(w, h, w / 2, h, res * 0.6, (g) => {
+      const pts = [[-w / 2, 0]];
+      for (let i = 1; i < 8; i++) pts.push([-w / 2 + (i / 8) * w + R.range(-8, 8), -h * Math.sin((i / 8) * Math.PI) * R.range(0.55, 1)]);
+      pts.push([w / 2, 0]);
+      g.fillStyle = '#0c0605';
+      g.beginPath();
+      pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+      g.fill();
+      g.strokeStyle = 'rgba(255,120,50,0.85)';
+      g.lineWidth = 2.5;
+      g.beginPath();
+      pts.slice(1, -1).forEach(([x, y], i) => (i ? g.lineTo(x, y + 1) : g.moveTo(x, y + 1)));
+      g.stroke();
+    });
+    S.fore = [{ s: rock(260, 80), x: 60 }, { s: rock(200, 60), x: 1260 }, { s: rock(150, 46), x: 1900, sc: 0.9 }];
     S.vparts = [];
     S.eruptT = 2;
     S.erupt = 0;
@@ -1949,7 +1986,7 @@ IMPL.volcano = {
     // Lava falls spill from notches just below two spire tops
     S.falls = [];
     for (const i of [1, 5]) {
-      const [sx, sh, sw] = S.spires[i];
+      const [sx, , sw] = S.spires[i];
       const fx = sx + sw * 0.22;
       S.falls.push([fx, -S.cliffHt(fx) * 0.92]);
     }
@@ -2130,13 +2167,14 @@ IMPL.volcano = {
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
       ctx.fillStyle = 'rgba(255,150,80,0.45)';
-      ctx.fillRect(0, F.gy - 0.5, view.w, 1.5);
+      ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5);
     }
   },
 
   front(ctx, S, cam, view) {
     drawGlowField(ctx, S.embersF, cam, view, '255,150,60', S.t, 1, 0.8);
-    screenGrad(ctx, view, [[0, 'rgba(30,0,0,0.25)'], [0.5, 'rgba(60,10,0,0)'], [1, 'rgba(120,30,0,0.12)']]);
+    drawFore(ctx, cam, view, S.fore);
+    if (S.hi) screenGrad(ctx, view, [[0, 'rgba(30,0,0,0.25)'], [0.5, 'rgba(60,10,0,0)'], [1, 'rgba(120,30,0,0.12)']]);
     vignette(ctx, view, '20,0,0', 0.6);
   },
 
@@ -2354,6 +2392,17 @@ IMPL.glacier = {
     S.snow = makeField(S.frng, S.n(120), (p, r) => { p.d = r.range(0.3, 0.85); p.s = r.range(0.8, 2.2) * (0.6 + p.d * 0.6); p.vx = r.range(20, 50); p.vy = r.range(30, 70); });
     S.snowF = makeField(S.frng, S.n(30), (p, r) => { p.d = r.range(1.2, 1.6); p.s = r.range(3, 5.5); p.vx = r.range(40, 80); p.vy = r.range(70, 120); });
     S.glints = Array.from({ length: S.n(22) }, () => ({ u: S.frng.range(-1300, 1300), r: S.frng.range(4, 200), ph: S.frng() * TAU, f: S.frng.range(0.6, 1.6) }));
+    const mound = (w, h) => makeSprite(w, h, w / 2, h, res * 0.5, (g) => {
+      g.fillStyle = lin(g, 0, -h, 0, 0, [[0, '#f4f9fd'], [0.6, '#c9dceb'], [1, '#9fbbd3']]);
+      g.beginPath();
+      g.moveTo(-w / 2, 0);
+      g.bezierCurveTo(-w * 0.35, -h * 0.9, -w * 0.05, -h * 1.05, w * 0.12, -h * 0.75);
+      g.bezierCurveTo(w * 0.3, -h * 0.5, w * 0.4, -h * 0.45, w / 2, 0);
+      g.fill();
+      g.fillStyle = 'rgba(120,160,200,0.25)';
+      g.beginPath(); g.ellipse(w * 0.15, -h * 0.25, w * 0.3, h * 0.2, 0, 0, TAU); g.fill();
+    });
+    S.fore = [{ s: mound(300, 70), x: 40 }, { s: mound(240, 54), x: 1250 }, { s: mound(200, 46), x: 1950 }];
     S.gust = 0;
   },
 
@@ -2452,7 +2501,7 @@ IMPL.glacier = {
       floorBase(ctx, F, [[0, '#b8d8ea'], [0.12, '#7aa8c8'], [0.5, '#3f6c94'], [1, '#1b355a']]);
       ctx.save();
       ctx.beginPath();
-      ctx.rect(0, F.gy, view.w, view.h - F.gy);
+      ctx.rect(-PAD, F.gy, view.w + 2 * PAD, view.h - F.gy + PAD);
       ctx.clip();
       ctx.translate(0, F.gy);
       ctx.scale(1, -0.6);
@@ -2481,7 +2530,7 @@ IMPL.glacier = {
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
       ctx.fillStyle = 'rgba(255,255,255,0.6)';
-      ctx.fillRect(0, F.gy - 0.5, view.w, 1.5);
+      ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5);
     }
   },
 
@@ -2497,7 +2546,8 @@ IMPL.glacier = {
       }
       ctx.globalAlpha = 1;
     }
-    screenGrad(ctx, view, [[0, 'rgba(0,10,40,0.2)'], [0.55, 'rgba(0,20,60,0)'], [1, 'rgba(120,200,255,0.06)']]);
+    drawFore(ctx, cam, view, S.fore);
+    if (S.hi) screenGrad(ctx, view, [[0, 'rgba(0,10,40,0.2)'], [0.55, 'rgba(0,20,60,0)'], [1, 'rgba(120,200,255,0.06)']]);
     vignette(ctx, view, '0,8,30', 0.55);
   },
 
@@ -2702,7 +2752,7 @@ IMPL.bamboo = {
       for (let i = 0; i < 9; i++) {
         const a = -Math.PI / 2 + R.range(-0.9, 0.9) + 0.4, L = R.range(90, 160);
         g.beginPath();
-        let x = R.range(0, 120), y = 0;
+        const x = R.range(0, 120), y = 0;
         const ex = x + Math.cos(a) * L * 1.6, ey = y + Math.sin(a) * L;
         for (let k = 0; k < 10; k++) {
           const t0 = k / 10, cx = x + (ex - x) * t0, cy = y + (ey - y) * t0 + Math.sin(t0 * 3) * 10;
@@ -2815,7 +2865,7 @@ IMPL.bamboo = {
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
       ctx.fillStyle = 'rgba(40,60,30,0.5)';
-      ctx.fillRect(0, F.gy - 0.5, view.w, 2);
+      ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 2);
     }
   },
 
@@ -2833,7 +2883,7 @@ IMPL.bamboo = {
       ctx.drawImage(S.ferns.c, 0, view.h - fh * 0.72, fw * 0.9, fh * 0.9);
       ctx.restore();
     }
-    screenGrad(ctx, view, [[0, 'rgba(255,250,220,0.10)'], [0.45, 'rgba(255,250,220,0)'], [1, 'rgba(20,40,20,0.15)']]);
+    if (S.hi) screenGrad(ctx, view, [[0, 'rgba(255,250,220,0.10)'], [0.45, 'rgba(255,250,220,0)'], [1, 'rgba(20,40,20,0.15)']]);
     vignette(ctx, view, '20,35,20', 0.45);
   },
 
@@ -3166,13 +3216,13 @@ IMPL.temple = {
       ctx.lineWidth = 1.2;
       ctx.beginPath();
       floorRays(ctx, F, 200, 100);
-      for (const r of [26, 64, 118, 190, 290]) if (r < F.rMax) { ctx.moveTo(0, fY(F, r)); ctx.lineTo(view.w, fY(F, r)); }
+      for (const r of [26, 64, 118, 190, 290]) if (r < F.rMax) { ctx.moveTo(-PAD, fY(F, r)); ctx.lineTo(view.w + PAD, fY(F, r)); }
       ctx.stroke();
       ctx.strokeStyle = 'rgba(214,168,75,0.85)';
       ctx.lineWidth = 2.2;
       ctx.beginPath();
       floorRays(ctx, F, 800, 0);
-      for (const r of [8, 12]) if (r < F.rMax) { ctx.moveTo(0, fY(F, r)); ctx.lineTo(view.w, fY(F, r)); }
+      for (const r of [8, 12]) if (r < F.rMax) { ctx.moveTo(-PAD, fY(F, r)); ctx.lineTo(view.w + PAD, fY(F, r)); }
       ctx.stroke();
       ctx.globalCompositeOperation = 'lighter';
       const [ssx] = layerToScreen(cam, view, 0.03, 470, -90);
@@ -3180,7 +3230,7 @@ IMPL.temple = {
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
       ctx.fillStyle = 'rgba(255,255,255,0.7)';
-      ctx.fillRect(0, F.gy - 0.5, view.w, 1.5);
+      ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5);
     }
   },
 
@@ -3196,7 +3246,7 @@ IMPL.temple = {
       }
       ctx.globalAlpha = 1;
     }
-    screenGrad(ctx, view, [[0, 'rgba(255,240,220,0.08)'], [0.5, 'rgba(255,230,200,0)'], [1, 'rgba(120,80,60,0.1)']]);
+    if (S.hi) screenGrad(ctx, view, [[0, 'rgba(255,240,220,0.08)'], [0.5, 'rgba(255,230,200,0)'], [1, 'rgba(120,80,60,0.1)']]);
     vignette(ctx, view, '70,50,80', 0.35);
   },
 
@@ -3613,7 +3663,7 @@ IMPL.necropolis = {
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
       ctx.fillStyle = 'rgba(160,210,200,0.25)';
-      ctx.fillRect(0, F.gy - 0.5, view.w, 1.5);
+      ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5);
     }
   },
 
@@ -3623,7 +3673,7 @@ IMPL.necropolis = {
     drawTile(ctx, b, S.fog, -90, S.t * 22);
     ctx.globalAlpha = 1;
     ctx.restore();
-    screenGrad(ctx, view, [[0, 'rgba(0,20,30,0.25)'], [0.5, 'rgba(0,30,30,0)'], [1, 'rgba(0,10,10,0.25)']]);
+    if (S.hi) screenGrad(ctx, view, [[0, 'rgba(0,20,30,0.25)'], [0.5, 'rgba(0,30,30,0)'], [1, 'rgba(0,10,10,0.25)']]);
     vignette(ctx, view, '0,4,8', 0.7);
   },
 
@@ -3795,6 +3845,27 @@ IMPL.foundry = {
     });
     S.embers = makeField(S.frng, S.n(36), (p, r) => { p.d = r.range(0.3, 0.9); p.s = r.range(1.5, 3.5); p.vx = r.range(-10, 10); p.vy = -r.range(20, 60); p.tw = r.range(4, 9); });
     S.dust = makeField(S.frng, S.n(40), (p, r) => { p.d = r.range(0.2, 0.7); p.s = r.range(0.8, 1.8); p.vx = r.range(4, 12); p.vy = r.range(-4, 6); });
+    const girder = makeSprite(340, 110, 170, 110, res * 0.5, (g) => {
+      g.fillStyle = '#0b0807';
+      g.fillRect(-170, -110, 340, 16);
+      g.fillRect(-170, -18, 340, 18);
+      g.strokeStyle = '#0b0807';
+      g.lineWidth = 9;
+      g.beginPath();
+      for (let x = -170; x < 170; x += 68) { g.moveTo(x, -96); g.lineTo(x + 34, -18); g.lineTo(x + 68, -96); }
+      g.stroke();
+      g.fillStyle = 'rgba(255,140,60,0.35)';
+      g.fillRect(-170, -110, 340, 2);
+    });
+    const post = makeSprite(120, 150, 60, 150, res * 0.5, (g) => {
+      g.fillStyle = '#0b0807';
+      g.fillRect(-12, -150, 24, 150);
+      g.fillRect(-60, -110, 120, 8);
+      g.fillRect(-60, -60, 120, 8);
+      g.fillStyle = 'rgba(255,140,60,0.4)';
+      g.fillRect(-12, -150, 2, 150);
+    });
+    S.fore = [{ s: girder, x: 90, dy: 30 }, { s: post, x: 1240, dy: 40 }, { s: girder, x: 1900, dy: 36, sc: 0.9 }];
     S.flick = 1;
   },
 
@@ -3992,28 +4063,29 @@ IMPL.foundry = {
       ctx.lineWidth = 3.4 * F.z;
       ctx.beginPath();
       floorRays(ctx, F, 30, 0, 14);
-      for (let r = 22; r < F.rMax; r += 10 + r * 0.08) { ctx.moveTo(0, fY(F, r)); ctx.lineTo(view.w, fY(F, r)); }
+      for (let r = 22; r < F.rMax; r += 10 + r * 0.08) { ctx.moveTo(-PAD, fY(F, r)); ctx.lineTo(view.w + PAD, fY(F, r)); }
       ctx.stroke();
       ctx.strokeStyle = '#2a201b';
       ctx.lineWidth = 7 * F.z;
       ctx.beginPath();
       floorRays(ctx, F, 240, 0, 14);
-      for (const r of [60, 140, 250]) if (r < F.rMax) { ctx.moveTo(0, fY(F, r)); ctx.lineTo(view.w, fY(F, r)); }
+      for (const r of [60, 140, 250]) if (r < F.rMax) { ctx.moveTo(-PAD, fY(F, r)); ctx.lineTo(view.w + PAD, fY(F, r)); }
       ctx.stroke();
       // solid diamond-plate edge strip at the back
       const y0 = F.gy, y1 = fY(F, 14);
       ctx.fillStyle = lin(ctx, 0, y0, 0, y1, [[0, '#6a5a4e'], [0.3, '#3d322b'], [1, '#2a221d']]);
-      ctx.fillRect(0, y0, view.w, y1 - y0);
+      ctx.fillRect(-PAD, y0, view.w + 2 * PAD, y1 - y0);
       floorTexture(ctx, F, S.grime, 1);
       ctx.fillStyle = 'rgba(255,190,120,0.45)';
-      ctx.fillRect(0, F.gy - 0.5, view.w, 1.5);
+      ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5);
       ctx.fillStyle = lin(ctx, 0, F.gy, 0, view.h, [[0, 'rgba(0,0,0,0)'], [1, 'rgba(0,0,0,0.3)']]);
-      ctx.fillRect(0, F.gy, view.w, view.h - F.gy);
+      ctx.fillRect(-PAD, F.gy, view.w + 2 * PAD, view.h - F.gy + PAD);
     }
   },
 
   front(ctx, S, cam, view) {
-    screenGrad(ctx, view, [[0, 'rgba(10,5,0,0.3)'], [0.5, 'rgba(40,15,0,0)'], [1, 'rgba(80,30,0,0.15)']]);
+    drawFore(ctx, cam, view, S.fore);
+    if (S.hi) screenGrad(ctx, view, [[0, 'rgba(10,5,0,0.3)'], [0.5, 'rgba(40,15,0,0)'], [1, 'rgba(80,30,0,0.15)']]);
     vignette(ctx, view, '10,4,0', 0.65);
   },
 
@@ -4056,9 +4128,9 @@ function drawShard(ctx, sh, x, y, s, t) {
   const ca = Math.cos(ax), sa = Math.sin(ax), cb = Math.cos(ay), sb = Math.sin(ay), cc = Math.cos(az), sc = Math.sin(az);
   const P = _shardBuf;
   for (let i = 0; i < V.length; i++) {
-    let [vx, vy, vz] = V[i];
-    let y1 = vy * ca - vz * sa, z1 = vy * sa + vz * ca;
-    let x2 = vx * cb + z1 * sb, z2 = -vx * sb + z1 * cb;
+    const [vx, vy, vz] = V[i];
+    const y1 = vy * ca - vz * sa, z1 = vy * sa + vz * ca;
+    const x2 = vx * cb + z1 * sb, z2 = -vx * sb + z1 * cb;
     const x3 = x2 * cc - y1 * sc, y3 = x2 * sc + y1 * cc;
     P[i * 3] = x + x3 * s; P[i * 3 + 1] = y + y3 * s; P[i * 3 + 2] = z2;
   }
@@ -4154,6 +4226,17 @@ IMPL.void = {
     S.rows = [0, 18, 42, 74, 116, 170, 240, 330];
     S.motes = makeField(S.frng, S.n(60), (p, r) => { p.d = r.range(0.3, 0.9); p.s = r.range(1.5, 3.5); p.vx = r.range(-8, 8); p.vy = -r.range(10, 35); p.tw = r.range(1, 4); p.c = r() < 0.6 ? 0 : 1; });
     S.motesF = makeField(S.frng, S.n(10), (p, r) => { p.d = r.range(1.2, 1.5); p.s = r.range(5, 9); p.vx = r.range(-6, 6); p.vy = -r.range(15, 30); p.tw = r.range(1, 3); p.a = 0.6; });
+    const tips = (w, h) => makeSprite(w, h, w / 2, h, res * 0.5, (g) => {
+      for (let i = 0; i < 5; i++) {
+        const bx = R.range(-w * 0.35, w * 0.35), bw = R.range(12, 26), bh = h * R.range(0.4, 1), tx = bx + R.range(-20, 20);
+        g.fillStyle = '#0c0418';
+        g.beginPath(); g.moveTo(bx - bw, 0); g.lineTo(tx, -bh); g.lineTo(bx + bw, 0); g.fill();
+        g.strokeStyle = 'rgba(190,140,255,0.6)';
+        g.lineWidth = 1.5;
+        g.beginPath(); g.moveTo(bx - bw, 0); g.lineTo(tx, -bh); g.stroke();
+      }
+    });
+    S.fore = [{ s: tips(220, 90), x: 50 }, { s: tips(180, 70), x: 1260 }, { s: tips(160, 60), x: 1950 }];
     S.eye = { lx: 0, ly: 0, tx: 0, ty: 0, blink: 0, blinkT: 3, flare: 0, lookT: 0 };
     S.pulse = 0;
   },
@@ -4299,7 +4382,7 @@ IMPL.void = {
       ctx.lineWidth = 1.3;
       ctx.beginPath();
       floorRays(ctx, F, 160, 0);
-      for (let k = 1; k < rows.length && rows[k] < F.rMax + 1; k++) { const y = fY(F, rows[k]); ctx.moveTo(0, y); ctx.lineTo(view.w, y); }
+      for (let k = 1; k < rows.length && rows[k] < F.rMax + 1; k++) { const y = fY(F, rows[k]); ctx.moveTo(-PAD, y); ctx.lineTo(view.w + PAD, y); }
       for (let k = 0; k < rows.length - 1 && rows[k] < F.rMax; k++) {
         const off = (k & 1) * 80;
         let u = Math.floor((fU0(F, rows[k + 1]) - off) / 160) * 160 + off;
@@ -4318,13 +4401,14 @@ IMPL.void = {
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
       ctx.fillStyle = 'rgba(200,150,255,0.6)';
-      ctx.fillRect(0, F.gy - 0.5, view.w, 1.5);
+      ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5);
     }
   },
 
   front(ctx, S, cam, view) {
     drawGlowField(ctx, S.motesF, cam, view, '170,120,255', S.t, 1, 0.5);
-    screenGrad(ctx, view, [[0, 'rgba(10,0,30,0.25)'], [0.5, 'rgba(20,0,40,0)'], [1, 'rgba(30,0,50,0.2)']]);
+    drawFore(ctx, cam, view, S.fore);
+    if (S.hi) screenGrad(ctx, view, [[0, 'rgba(10,0,30,0.25)'], [0.5, 'rgba(20,0,40,0)'], [1, 'rgba(30,0,50,0.2)']]);
     vignette(ctx, view, '6,0,16', 0.7);
   },
 
@@ -4579,7 +4663,7 @@ IMPL.lab = {
       ctx.lineWidth = 1;
       ctx.beginPath();
       floorRays(ctx, F, 100, 0);
-      for (const r of [30, 70, 125, 200]) if (r < F.rMax) { ctx.moveTo(0, fY(F, r)); ctx.lineTo(view.w, fY(F, r)); }
+      for (const r of [30, 70, 125, 200]) if (r < F.rMax) { ctx.moveTo(-PAD, fY(F, r)); ctx.lineTo(view.w + PAD, fY(F, r)); }
       ctx.stroke();
       ctx.strokeStyle = 'rgba(50,85,125,0.32)';
       ctx.lineWidth = 1.6;
@@ -4614,7 +4698,7 @@ IMPL.lab = {
         drawSprite(ctx, s, fX(F, u, 20), fY(F, 20), sc);
       }
       ctx.fillStyle = 'rgba(40,150,210,0.7)';
-      ctx.fillRect(0, F.gy - 1, view.w, 2);
+      ctx.fillRect(-PAD, F.gy - 1, view.w + 2 * PAD, 2);
       // impact markers
       ctx.font = `700 ${Math.round(12 * F.z)}px system-ui, sans-serif`;
       ctx.textAlign = 'center';
@@ -4747,34 +4831,45 @@ export function arenaImpact(state, x, y, power) {
   IMPL[state.id].impact(state, x, y, power);
 }
 
-// Stage-select thumbnails: one low-quality, low-res state per arena, animated by t.
+// Stage-select thumbnails. Each arena gets one low-quality, low-res state and an
+// offscreen image at the thumbnail's device resolution. The image is re-rendered
+// at ~24fps of `t`, and at most PREVIEW_BUDGET thumbnails re-render per distinct
+// `t` (i.e. per frame), so a grid of ten animated previews stays cheap.
 const _previews = new Map();
+const PREVIEW_FPS = 24;
+const PREVIEW_BUDGET = 3;
+let _pvFrameT = null;
+let _pvCount = 0;
 export function drawArenaPreview(ctx, id, x, y, w, h, t = 0) {
   if (!ctx || !(w > 2 && h > 2)) return;
-  let st = _previews.get(id);
-  if (!st) {
-    st = createArenaState(id, { quality: 'low', seed: 1, res: 0.75 });
-    st.previewT = null;
-    _previews.set(id, st);
-  }
-  if (st.previewT == null) {
+  t = Number.isFinite(t) ? t : 0;
+  let pv = _previews.get(id);
+  if (!pv) {
+    const st = createArenaState(id, { quality: 'low', seed: 1, res: 0.75 });
     for (let i = 0; i < 90; i++) updateArena(st, 1 / 30);
-  } else {
-    const dt = t - st.previewT;
-    if (dt > 0) updateArena(st, Math.min(dt, 0.1));
-    else if (dt < -0.5) updateArena(st, 1 / 60);
+    pv = { st, img: null, cw: 0, ch: 0, lastT: null };
+    _previews.set(id, pv);
   }
-  st.previewT = t;
-  const vh = 720, vw = clamp((vh * w) / h, 320, 4000);
-  const view = { w: vw, h: vh };
-  const cam = { x: Math.sin(t * 0.12) * 240, y: -30, zoom: 0.74 };
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(x, y, w, h);
-  ctx.clip();
-  ctx.translate(x, y);
-  ctx.scale(h / vh, h / vh);
-  drawArenaBack(ctx, st, cam, view);
-  drawArenaFront(ctx, st, cam, view);
-  ctx.restore();
+  const m = ctx.getTransform ? ctx.getTransform() : { a: 1, b: 0 };
+  const ds = clamp(Math.hypot(m.a, m.b) || 1, 0.25, 4);
+  const cw = Math.min(960, Math.ceil(w * ds)), ch = Math.min(540, Math.ceil(h * ds));
+  if (t !== _pvFrameT) { _pvFrameT = t; _pvCount = 0; }
+  const resized = !pv.img || pv.cw !== cw || pv.ch !== ch;
+  const due = pv.lastT == null || t < pv.lastT || t - pv.lastT >= 1 / PREVIEW_FPS;
+  if (resized || (due && _pvCount < PREVIEW_BUDGET)) {
+    if (resized) { pv.img = createCanvas(cw, ch); pv.cw = cw; pv.ch = ch; }
+    if (pv.lastT != null && t > pv.lastT) updateArena(pv.st, Math.min(t - pv.lastT, 0.1));
+    pv.lastT = t;
+    _pvCount++;
+    const g = pv.img ? pv.img.getContext('2d') : null;
+    if (g) {
+      const vh = 720, vw = clamp((vh * w) / h, 320, 4000);
+      const view = { w: vw, h: vh };
+      const cam = { x: Math.sin(t * 0.12) * 240, y: -30, zoom: 0.74 };
+      g.setTransform(cw / vw, 0, 0, ch / vh, 0, 0);
+      drawArenaBack(g, pv.st, cam, view);
+      drawArenaFront(g, pv.st, cam, view);
+    }
+  }
+  if (pv.img) ctx.drawImage(pv.img, x, y, w, h);
 }

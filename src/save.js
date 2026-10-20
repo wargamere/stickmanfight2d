@@ -18,7 +18,7 @@ export function defaultSave() {
     ach: {},
     settings: {
       master: 0.8, music: 0.55, sfx: 0.9, shake: 1, damageNumbers: true, flashes: true,
-      quality: 'high', difficulty: 2, touch: 'auto', rounds: 2, time: 99,
+      quality: 'high', difficulty: 2, touch: 'auto', rounds: 2, time: 99, autoPerfDone: false,
     },
     bindings: null,
     lastP1: 'kai',

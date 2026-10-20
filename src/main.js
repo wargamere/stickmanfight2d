@@ -11,8 +11,11 @@ const ctx = canvas.getContext('2d', { alpha: false });
 
 export const view = { w: 1280, h: 720, scale: 1, ox: 0, oy: 0, dpr: 1, cw: 0, ch: 0 };
 
+let maxPixels = 2560 * 1440;
 function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  // cap the backing store so huge/retina screens don't melt weaker GPUs
+  while (dpr > 0.5 && window.innerWidth * window.innerHeight * dpr * dpr > maxPixels) dpr *= 0.9;
   const cw = Math.floor(window.innerWidth * dpr);
   const ch = Math.floor(window.innerHeight * dpr);
   canvas.width = cw;
@@ -36,6 +39,10 @@ initInput(canvas);
 // Game object shared by scenes
 // ---------------------------------------------------------------------------
 const save = loadSave();
+if (save.settings.quality === 'low') {
+  maxPixels = 1280 * 720;
+  resize();
+}
 audio.setVolumes({ master: save.settings.master, music: save.settings.music, sfx: save.settings.sfx });
 
 const game = {
@@ -123,9 +130,27 @@ function draw() {
   ctx.restore();
 }
 
+// Auto performance mode: if the browser can't hold ~40fps for a few seconds
+// during play, drop to performance mode once.
+let slowFrames = 0;
+function watchPerformance(dt) {
+  if (save.settings.quality !== 'high' || save.settings.autoPerfDone) return;
+  if (!game.scene || !game.scene.wantsTouch) return; // only judge during fights
+  slowFrames = dt > 25 ? slowFrames + 1 : Math.max(0, slowFrames - 2);
+  if (slowFrames > 150) {
+    save.settings.quality = 'low';
+    save.settings.autoPerfDone = true;
+    persist(save);
+    maxPixels = 1280 * 720;
+    resize();
+    game.toasts?.push('PERFORMANCE MODE', 'Lowered effects for a smoother framerate (Settings → Graphics)', '#4ab8ff', '⚡');
+  }
+}
+
 function frame(now) {
   let dt = now - last;
   last = now;
+  watchPerformance(dt);
   if (dt > 250) dt = 250;
   acc += dt;
   let n = 0;

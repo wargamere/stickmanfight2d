@@ -1,7 +1,7 @@
 // In-fight HUD: health, stamina, meter, timer, round pips, combo counters,
 // announcer text and the ultimate banner.
 
-import { clamp, lerp, ease, shade, rgba } from './util.js';
+import { clamp, lerp, ease, shade, rgba, readable } from './util.js';
 
 export const FONT_BIG = '"Bangers", "Impact", "Arial Black", sans-serif';
 export const FONT_UI = '"Russo One", "Arial Black", "Segoe UI", sans-serif';
@@ -153,8 +153,10 @@ export class HUD {
     });
     const tag = match.labels?.[side];
     if (tag) {
-      text(ctx, tag, side === 0 ? x0 + 6 + ctx.measureText(f.def.name).width + 70 : x0 + barW - 80 - f.def.name.length * 14, y - 14, {
-        size: 13, align: side === 0 ? 'left' : 'right', color: f.skin.accent, font: FONT_UI, stroke: '#000', sw: 3,
+      ctx.font = `20px ${FONT_UI}`;
+      const nw = ctx.measureText(f.def.name).width;
+      text(ctx, tag, side === 0 ? x0 + 18 + nw : x0 + barW - 18 - nw, y - 13, {
+        size: 13, align: side === 0 ? 'left' : 'right', color: side === 0 ? '#4ab8ff' : '#ff5c6c', font: FONT_UI, stroke: '#000', sw: 3,
       });
     }
 
@@ -237,18 +239,19 @@ export class HUD {
     const my = view.h - 40;
     const mx = side === 0 ? 40 : W - 40 - mw;
     const pm = clamp(f.meter / 100, 0, 1);
+    const acc = readable(f.skin.accent);
     ctx.save();
     skewRect(ctx, mx - 3, my - 3, mw + 6, mh + 6, side === 0 ? 8 : -8);
     ctx.fillStyle = 'rgba(8,8,16,0.85)';
     ctx.fill();
-    ctx.strokeStyle = pm >= 1 ? f.skin.accent : 'rgba(255,255,255,0.25)';
+    ctx.strokeStyle = pm >= 1 ? acc : 'rgba(255,255,255,0.25)';
     ctx.lineWidth = 2;
     ctx.stroke();
     skewRect(ctx, mx, my, mw, mh, side === 0 ? 8 : -8);
     ctx.clip();
     const mg = ctx.createLinearGradient(mx, 0, mx + mw, 0);
-    mg.addColorStop(0, shade(f.skin.accent, -0.3));
-    mg.addColorStop(1, f.skin.accent);
+    mg.addColorStop(0, shade(acc, -0.3));
+    mg.addColorStop(1, acc);
     ctx.fillStyle = mg;
     if (side === 0) ctx.fillRect(mx, my, mw * pm, mh);
     else ctx.fillRect(mx + mw * (1 - pm), my, mw * pm, mh);
@@ -263,7 +266,7 @@ export class HUD {
     const label = pm >= 1 ? 'ULTIMATE READY' : pm >= 0.5 ? 'BREAKER READY' : 'POWER';
     text(ctx, label, side === 0 ? mx : mx + mw, my - 12, {
       size: 14, align: side === 0 ? 'left' : 'right', font: FONT_UI,
-      color: pm >= 1 ? f.skin.accent : pm >= 0.5 ? '#ffffff' : 'rgba(255,255,255,0.6)',
+      color: pm >= 1 ? acc : pm >= 0.5 ? '#ffffff' : 'rgba(255,255,255,0.6)',
       stroke: '#000', sw: 3, alpha: pm >= 1 ? 0.75 + 0.25 * Math.sin(t * 0.25) : 1,
     });
     const hint = match.keyHints?.[side];

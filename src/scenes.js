@@ -17,7 +17,7 @@ import {
   C, text, FONT_UI, FONT_BIG, FONT_BODY, sfx, panel, roundRect, skewPanel, title, hints, coins, coinIcon, bar,
   lockIcon, ListMenu, Toasts, backdrop, vignette, wrapText, inRect, clamp, lerp, ease, rgba, shade,
 } from './ui.js';
-import { pick, shuffle, formatNum } from './util.js';
+import { pick, shuffle, formatNum, readable } from './util.js';
 
 const PLAYABLE_ARENAS = ARENAS.filter((a) => a.id !== 'lab');
 const arenaName = (id) => (ARENAS.find((a) => a.id === id) || { name: id }).name;
@@ -271,6 +271,7 @@ export function createScenes(game) {
       this.cursors.forEach((c, k) => {
         c.preview.update();
         c.anim++;
+        if (c.activeFrom === this.t) return; // was handed control this very frame
         if (c.phase === 'wait' || c.phase === 'done') {
           if (c.phase === 'done' && !this.simul && this.inputFor(k).fired.back && k === this.lastDoneIdx()) this.unpick(k);
           if (c.phase === 'done' && this.simul && this.inputFor(k).fired.back) this.unpick(k);
@@ -384,6 +385,7 @@ export function createScenes(game) {
       if (!this.simul && k + 1 < this.cursors.length) {
         const nx = this.cursors[k + 1];
         nx.phase = 'pick';
+        nx.activeFrom = this.t;
         nx.i = c.i;
         this.syncPreview(nx);
       }
@@ -760,7 +762,7 @@ export function createScenes(game) {
   class Results extends MenuScene {
     constructor({ result, match, headline, sub, rewards = [], items, winnerSide, humanSide = 0 }) {
       super();
-      this.dim = 0.85;
+      this.dim = 0.92;
       this.music = null;
       this.result = result;
       this.headline = headline;
@@ -769,7 +771,7 @@ export function createScenes(game) {
       this.total = rewards.reduce((s, r) => s + r[1], 0);
       this.shown = 0;
       this.names = match.f.map((f) => f.def.name);
-      this.colors = match.f.map((f) => f.skin.accent);
+      this.colors = match.f.map((f) => readable(f.skin.color));
       const ws = winnerSide ?? result.winner;
       const wf = match.f[Math.max(0, ws)];
       this.preview = new FighterPreview(wf.def.id, { mode: 'victory', facing: 1 });
@@ -795,7 +797,13 @@ export function createScenes(game) {
       const won = this.headline.win;
       text(ctx, this.headline.text, 60, 82, { size: 92, font: FONT_BIG, align: 'left', color: won ? C.accent : '#ff5c5c', stroke: '#000', sw: 9, shadow: 'rgba(0,0,0,0.5)' });
       if (this.sub) text(ctx, this.sub, 64, 140, { size: 22, font: FONT_UI, align: 'left', color: '#fff' });
-      this.preview.draw(ctx, view.w * 0.52, view.h * 0.74, 1.7);
+      const sx = view.w * 0.52, sy = view.h * 0.74;
+      const spot = ctx.createRadialGradient(sx, sy - 120, 10, sx, sy - 120, 300);
+      spot.addColorStop(0, rgba(readable(this.preview.f.skin.accent), 0.28));
+      spot.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = spot;
+      ctx.fillRect(sx - 320, sy - 440, 640, 520);
+      this.preview.draw(ctx, sx, sy, 1.7);
       // stats table
       const st = this.result.stats;
       const rows = [
@@ -1604,7 +1612,7 @@ export function createScenes(game) {
         { label: 'SCREEN SHAKE', ...cycle('shake', [0, 0.5, 1], ['OFF', 'LOW', 'FULL']) },
         { label: 'SCREEN FLASHES', ...toggle('flashes', 'ON', 'REDUCED') },
         { label: 'DAMAGE NUMBERS', ...toggle('damageNumbers') },
-        { label: 'GRAPHICS', ...cycle('quality', ['high', 'low'], ['HIGH', 'PERFORMANCE']) },
+        { label: 'GRAPHICS', ...cycle('quality', ['high', 'low'], ['HIGH', 'PERFORMANCE']), note: 'applies to the next fight' },
         { label: 'TOUCH CONTROLS', ...cycle('touch', ['auto', 'on', 'off'], ['AUTO', 'ALWAYS', 'OFF']) },
         { label: 'FULLSCREEN', action: () => toggleFullscreen() },
         { label: 'CONTROLS', action: () => game.go(new Controls()) },
@@ -1893,7 +1901,7 @@ export function createScenes(game) {
         p2: { id: b, ctrl: 'cpu', level: lvl, dummy: q.get('dummy') || undefined },
         arena, rounds: 2, time: 99, labels: ['YOU', 'CPU'], intro: !q.get('nointro'),
       };
-      const fight = () => new FightScene(cfg, { onEnd: () => game.go(fight()) });
+      const fight = () => new FightScene(cfg, { onEnd: () => game.go(fight()), humanSides: [!q.get('cpu'), false] });
       return fight();
     }
     if (q.get('scene')) {
