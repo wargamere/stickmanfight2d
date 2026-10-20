@@ -260,6 +260,17 @@ function drawGlow(ctx, rgb, x, y, r, a = 1, kind = 0) {
   ctx.globalAlpha = a > 1 ? 1 : a;
   ctx.drawImage(s, x - r, y - r, r * 2, r * 2);
 }
+// Soft disc from three concentric circles in the current fillStyle: a cheap
+// stand-in for scaled glow sprites (dust, smoke, flashes).
+function softDot(ctx, x, y, r, a) {
+  if (a <= 0.004 || r <= 0) return;
+  ctx.globalAlpha = a * 0.3;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+  ctx.globalAlpha = a * 0.35;
+  ctx.beginPath(); ctx.arc(x, y, r * 0.68, 0, TAU); ctx.fill();
+  ctx.globalAlpha = a * 0.45;
+  ctx.beginPath(); ctx.arc(x, y, r * 0.38, 0, TAU); ctx.fill();
+}
 // Stretched glow (ellipse).
 function drawGlowE(ctx, rgb, x, y, rx, ry, a = 1, kind = 0) {
   if (a <= 0.004) return;
@@ -271,7 +282,7 @@ function drawGlowE(ctx, rgb, x, y, rx, ry, a = 1, kind = 0) {
 
 // ── Transforms ───────────────────────────────────────────────────────────
 // Enter a parallax layer (caller must ctx.restore()). Returns visible bounds in layer coords.
-const layerZ = (cam, p) => (p < ZOOM_P ? 1 : 1 + (cam.zoom - 1) * p);
+const layerZ = (cam, p) => (p < ZOOM_P ? 1 : Math.max(0.05, 1 + (cam.zoom - 1) * p));
 function layer(ctx, cam, view, p) {
   const z = layerZ(cam, p);
   ctx.save();
@@ -349,10 +360,6 @@ function floorPoly(ctx, F, pts, du) {
   ctx.moveTo(fX(F, pts[0] + du, pts[1]), fY(F, pts[1]));
   for (let i = 2; i < pts.length; i += 2) ctx.lineTo(fX(F, pts[i] + du, pts[i + 1]), fY(F, pts[i + 1]));
   ctx.closePath();
-}
-function floorLine(ctx, F, pts, du) {
-  ctx.moveTo(fX(F, pts[0] + du, pts[1]), fY(F, pts[1]));
-  for (let i = 2; i < pts.length; i += 2) ctx.lineTo(fX(F, pts[i] + du, pts[i + 1]), fY(F, pts[i + 1]));
 }
 // Iterate periodic floor features: calls fn(du) for each period copy that may be visible.
 function floorCopies(F, period, uMin, uMax, fn) {
@@ -609,18 +616,24 @@ function drawDebris(ctx, S, cam, view, front) {
     switch (p.k) {
       case 'puff': {
         const a = p.a * (f < 0.7 ? f / 0.7 : 1) * Math.min(1, (1 - f) * 8);
-        drawGlow(ctx, p.rgb, p.x, p.y, p.s, a, 1);
+        ctx.fillStyle = `rgb(${p.rgb})`;
+        softDot(ctx, p.x, p.y, p.s * 0.85, a * 0.9);
         break;
       }
       case 'glow': {
         ctx.globalCompositeOperation = 'lighter';
-        drawGlow(ctx, p.rgb, p.x, p.y, p.s, p.a * f, 0);
+        ctx.fillStyle = `rgb(${p.rgb})`;
+        ctx.globalAlpha = p.a * f * 0.25;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.s * 0.8, 0, TAU); ctx.fill();
+        ctx.globalAlpha = p.a * f;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.s * 0.25, 0, TAU); ctx.fill();
         ctx.globalCompositeOperation = 'source-over';
         break;
       }
       case 'flash': {
         ctx.globalCompositeOperation = 'lighter';
-        drawGlow(ctx, p.rgb, p.x, p.y, p.s * (1.4 - f * 0.4), p.a * f * f, 0);
+        ctx.fillStyle = `rgb(${p.rgb})`;
+        softDot(ctx, p.x, p.y, p.s * (1.1 - f * 0.4), p.a * f * f * 0.8);
         ctx.globalCompositeOperation = 'source-over';
         break;
       }
@@ -2158,7 +2171,7 @@ IMPL.volcano = {
       const n = S.hi ? 22 : 11;
       for (let i = 0; i < n; i++) vp.push({ k: 0, x: VOLC_X + R.range(-30, 30), y: VOLC_TOP, vx: R.range(-170, 170), vy: -R.range(220, 460), life: R.range(1.6, 2.6), m: 0 });
     }
-    if (R() < dt * (S.hi ? 7 : 3.5)) vp.push({ k: 1, x: VOLC_X + R.range(-30, 30), y: VOLC_TOP - 10, vx: R.range(5, 25), vy: -R.range(25, 45), life: R.range(5, 8), m: 0, s: R.range(30, 50) });
+    if (R() < dt * (S.hi ? 3.5 : 1.8)) vp.push({ k: 1, x: VOLC_X + R.range(-30, 30), y: VOLC_TOP - 10, vx: R.range(5, 25), vy: -R.range(25, 45), life: R.range(5, 8), m: 0, s: R.range(30, 50) });
     for (let i = vp.length - 1; i >= 0; i--) {
       const p = vp[i];
       p.life -= dt;
@@ -2177,11 +2190,12 @@ IMPL.volcano = {
     // live volcano details on top of the panorama: plume, crater pulse, bombs
     let b = layer(ctx, cam, view, VOLC_P);
     const vx = VOLC_X, top = VOLC_TOP;
+    ctx.fillStyle = '#28100e';
     for (const p of S.vparts) {
       if (p.k !== 1) continue;
-      const a = Math.min(1, p.m * 0.8) * Math.min(1, p.life * 0.4) * 0.7;
-      drawGlow(ctx, '40,16,14', p.x, p.y, p.s, a, 1);
+      softDot(ctx, p.x, p.y, p.s * 0.9, Math.min(1, p.m * 0.8) * Math.min(1, p.life * 0.4) * 0.8);
     }
+    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'lighter';
     const pulse = 0.75 + 0.25 * Math.sin(t * 2.2) + S.erupt * 0.6;
     drawGlowE(ctx, '255,120,40', vx, top + 6, 120, 50, 0.6 * pulse);
@@ -2192,12 +2206,15 @@ IMPL.volcano = {
       volcStreams(ctx, vx, top);
       ctx.stroke();
     }
+    ctx.fillStyle = '#ff9a40';
     for (const p of S.vparts) {
       if (p.k !== 0) continue;
-      drawGlow(ctx, '255,140,50', p.x, p.y, 16, Math.min(1, p.life), 0);
-      drawGlow(ctx, '255,230,160', p.x, p.y, 5, Math.min(1, p.life), 0);
+      ctx.globalAlpha = Math.min(1, p.life);
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, TAU); ctx.fill();
+      ctx.globalAlpha = Math.min(1, p.life) * 0.25;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 11, 0, TAU); ctx.fill();
     }
-    if (S.erupt > 0) drawGlow(ctx, '255,170,80', vx, top, 200 * S.erupt + 50, S.erupt * 0.8);
+    if (S.erupt > 0) { ctx.fillStyle = '#ffaa50'; softDot(ctx, vx, top, 160 * S.erupt + 40, S.erupt * 0.7); }
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     ctx.restore();
