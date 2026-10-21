@@ -1,0 +1,17 @@
+{
+  "name": "stickman-fight-2d",
+  "version": "1.0.0",
+  "description": "A fast, deep, juicy 2D stickman fighting game for the browser. Zero assets, all procedural.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:e2e": "node scripts/e2e.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "license": "MIT"
+}
