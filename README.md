@@ -52,6 +52,7 @@ npm run build        # → dist/index.html
 - **Throws.** Throws beat blocking, can be thrown backwards, and can be escaped.
 - **Movement.** Dash or run, invincible back-dash, double jump, air dash, fast fall and wall jump.
 - **Ultimates.** A super-flash freeze and an ultimate name banner, then a scripted cinematic with camera work if the first hit connects.
+- **Animation.** Attacks are keyed with anticipation and follow-through. On top of that, springs add secondary motion: a hit whips the head back or folds the body depending on where it lands, landings squash, juggled fighters tumble, and walking feet stay planted.
 - **Juice.** Hit-stop, trauma screen shake, camera kicks, sparks, slash trails, afterimages, damage numbers, slow-motion KOs and **ragdoll physics** on knockout.
 
 ## Controls

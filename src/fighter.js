@@ -1250,6 +1250,8 @@ export class Fighter {
           V[i] = V[i] * d + diff * k;
           X[i] += V[i];
         }
+        // keep angles in (-180, 180] so a later straight-line blend never spins the long way round
+        if (ANGLE[i]) X[i] = wrapDeg(X[i]);
       }
       for (let i = 0; i < NP; i++) {
         if (O[i] === 0 && OV[i] === 0) continue;

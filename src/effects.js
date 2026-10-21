@@ -378,19 +378,22 @@ export class Trail {
   clear() {
     this.pts.length = 0;
   }
+  // A crescent smear hugging the tip's path: wide and bright at the newest
+  // sample, thinning to nothing at the oldest.
   draw(ctx, color, alpha = 0.8) {
     const P = this.pts;
-    if (P.length < 2) return;
+    const n = P.length;
+    if (n < 2) return;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    for (let i = 1; i < P.length; i++) {
+    ctx.fillStyle = color;
+    for (let i = 1; i < n; i++) {
       const a = P[i - 1], b = P[i];
-      const k = i / P.length;
-      ctx.globalAlpha = alpha * k * k;
-      ctx.fillStyle = color;
+      const ka = (i - 1) / (n - 1), kb = i / (n - 1);
+      ctx.globalAlpha = alpha * 0.75 * kb * kb;
       ctx.beginPath();
-      // ribbon quad between successive base->tip segments (biased to the tip)
-      const ia = 0.45, ib = 0.45;
+      // inner edge sits part-way down the limb/blade; the band widens toward the newest sample
+      const ia = 1 - 0.32 * ka, ib = 1 - 0.32 * kb;
       ctx.moveTo(lerp(a[0], a[2], ia), lerp(a[1], a[3], ia));
       ctx.lineTo(a[2], a[3]);
       ctx.lineTo(b[2], b[3]);
@@ -398,16 +401,19 @@ export class Trail {
       ctx.closePath();
       ctx.fill();
     }
-    // bright edge
-    ctx.globalAlpha = alpha;
+    // bright cutting edge, tapering toward the tail
     ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (let i = 0; i < P.length; i++) {
-      const p = P[i];
-      i ? ctx.lineTo(p[2], p[3]) : ctx.moveTo(p[2], p[3]);
+    ctx.lineCap = 'round';
+    for (let i = 1; i < n; i++) {
+      const a = P[i - 1], b = P[i];
+      const k = i / (n - 1);
+      ctx.globalAlpha = alpha * k;
+      ctx.lineWidth = 0.5 + 2.5 * k;
+      ctx.beginPath();
+      ctx.moveTo(a[2], a[3]);
+      ctx.lineTo(b[2], b[3]);
+      ctx.stroke();
     }
-    ctx.stroke();
     ctx.restore();
   }
 }

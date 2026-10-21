@@ -12,7 +12,7 @@ import { aiParams, AI_LEVELS } from '../src/ai.js';
 import { Controller } from '../src/input.js';
 import { defaultSave } from '../src/save.js';
 import { ARENAS } from '../src/arenas.js';
-import { sampleKeys } from '../src/fighter.js';
+import { sampleKeys, Fighter } from '../src/fighter.js';
 
 test('segment distance and capsule overlap', () => {
   assert.equal(segSegDist(0, 0, 10, 0, 0, 5, 10, 5).d, 5);
@@ -76,6 +76,26 @@ test('shared move sets are well formed', () => {
   const out = makePose();
   sampleKeys(FIST_SET.L1.keys, 4, out);
   assert.ok(out.hf[0] > 40, 'jab extends by its active frame');
+});
+
+test('render pose springs settle on the target and take the short way round', () => {
+  const f = new Fighter(getFighter('kai'), { side: 0, controller: new Controller() });
+  f.setState('idle');
+  for (let i = 0; i < 40; i++) f.computePose();
+  assert.ok(Math.abs(f.rpose.hip[1] - f.pose.hip[1]) < 0.1, 'settles on the target');
+  // after a flip the drawn rotation can sit near 360; it must come back via 0, not spin backwards
+  f.aX[12] = 350;
+  f.aV[12] = 0;
+  f.computePose();
+  assert.ok(f.rpose.rot > -10 && f.rpose.rot <= 0, `rot ${f.rpose.rot}`);
+  // a hit snaps to the hurt pose at once, plus a decaying whip
+  f.setState('hitstun');
+  f.stun = 20;
+  f.hitReact(true, 1);
+  f.computePose();
+  assert.ok(f.rpose.head < f.pose.head - 10, 'head whips back on a high hit');
+  for (let i = 0; i < 60; i++) f.computePose();
+  assert.ok(Math.abs(f.rpose.head - f.pose.head) < 0.5, 'whip decays');
 });
 
 test('roster: 12 unique fighters with complete kits', () => {

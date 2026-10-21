@@ -32,6 +32,7 @@ export class AI {
     this.setLevel(level);
     this.held = { left: false, right: false, up: false, down: false, atk: false, spc: false, ult: false, dash: false, grab: false };
     this.taps = new Set();
+    this.noDoubleTap = true; // the CPU dashes on purpose with tap('dash'), never by re-pressing a direction
     this.stepT = 0;
     this.stepDir = 0;
     this.cool = {};

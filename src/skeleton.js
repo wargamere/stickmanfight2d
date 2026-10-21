@@ -245,6 +245,16 @@ export class Strand {
         }
       }
     }
+    // hard length limit from the anchor out, so fast spins can't stretch the cloth
+    for (let i = 1; i < n; i++) {
+      const ddx = px[i] - px[i - 1], ddy = py[i] - py[i - 1];
+      const d = Math.hypot(ddx, ddy);
+      if (d > seg * 1.05) {
+        const k = (seg * 1.05) / d;
+        px[i] = px[i - 1] + ddx * k;
+        py[i] = py[i - 1] + ddy * k;
+      }
+    }
   }
   draw(ctx, color, w0, w1, outline) {
     const { px, py, n } = this;

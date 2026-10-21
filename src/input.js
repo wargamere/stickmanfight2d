@@ -244,7 +244,7 @@ export class Controller {
       if (h[a] && !this.prev[a]) {
         this.pressAt[a] = this.frame;
         this.consumed[a] = false;
-        if (a === 'left' || a === 'right') {
+        if ((a === 'left' || a === 'right') && !this.ai?.noDoubleTap) {
           if (this.frame - this.lastTap[a] <= 13) {
             this.dashTap = a === 'left' ? -1 : 1;
             this.dashTapAt = this.frame;
