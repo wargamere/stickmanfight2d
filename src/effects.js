@@ -211,6 +211,7 @@ export class Effects {
       const k = 1 - g.age / g.life;
       const look = g.look;
       look.alpha = g.alpha * k;
+      look.flat = true;
       if (g.tint) {
         look.color = g.tint;
         look.backColor = g.tint;

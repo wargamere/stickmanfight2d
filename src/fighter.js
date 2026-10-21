@@ -9,6 +9,10 @@ import { createAccessories } from './accessories.js';
 export const GRAVITY = 0.86;
 export const ARENA_HALF = 1000;
 
+const EXPR = {
+  attack: 'attack', hitstun: 'hurt', juggle: 'hurt', knockdown: 'hurt', getup: 'hurt', parried: 'hurt',
+  grabbed: 'hurt', ultlocked: 'hurt', blockstun: 'attack', defeat: 'hurt', dizzy: 'ko', ko: 'ko', victory: 'happy',
+};
 const NEUTRAL_STATES = new Set(['idle', 'walk', 'run']);
 const HURT_STATES = new Set(['hitstun', 'juggle', 'knockdown', 'getup', 'grabbed', 'ultlocked', 'dizzy', 'frozen', 'ko']);
 
@@ -31,6 +35,97 @@ export function sampleKeys(keys, f, out) {
   return copyPose(getPose(keys[keys.length - 1][1]), out);
 }
 
+// ---------------------------------------------------------------- animation helpers
+// Pose <-> flat array, so springs can run over every channel at once.
+const NP = 16;
+const A = { hipX: 0, hipY: 1, lean: 2, head: 3, hfX: 4, hfY: 5, hbX: 6, hbY: 7, ffX: 8, ffY: 9, fbX: 10, fbY: 11, rot: 12, w: 13, w2: 14, wl: 15 };
+const ANGLE = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0];
+// [stiffness, damping] per state; tuned for a 3-6 frame settle with little overshoot
+const SPRINGS = {
+  default: [0.26, 0.38],
+  idle: [0.2, 0.42],
+  walk: [0.3, 0.36],
+  run: [0.36, 0.3],
+  block: [0.36, 0.3],
+  blockstun: [0.36, 0.3],
+  hitstun: [0.3, 0.38],
+  parried: [0.26, 0.38],
+  juggle: [0.32, 0.34],
+  knockdown: [0.3, 0.38],
+  getup: [0.34, 0.32],
+  dizzy: [0.14, 0.5],
+  ultlocked: [0.4, 0.3],
+  grabbed: [0.4, 0.3],
+  intro: [0.18, 0.46],
+  victory: [0.18, 0.46],
+  defeat: [0.16, 0.46],
+};
+
+function wrapDeg(d) {
+  d %= 360;
+  if (d > 180) d -= 360;
+  else if (d < -180) d += 360;
+  return d;
+}
+
+function packPose(p, a) {
+  a[0] = p.hip[0];
+  a[1] = p.hip[1];
+  a[2] = p.lean;
+  a[3] = p.head;
+  a[4] = p.hf[0];
+  a[5] = p.hf[1];
+  a[6] = p.hb[0];
+  a[7] = p.hb[1];
+  a[8] = p.ff[0];
+  a[9] = p.ff[1];
+  a[10] = p.fb[0];
+  a[11] = p.fb[1];
+  a[12] = p.rot;
+  a[13] = p.w == null ? NaN : p.w;
+  a[14] = p.w2 == null ? NaN : p.w2;
+  a[15] = p.wl ?? 0;
+}
+
+function unpackPose(a, o, p) {
+  p.hip[0] = a[0] + o[0];
+  p.hip[1] = a[1] + o[1];
+  p.lean = a[2] + o[2];
+  p.head = a[3] + o[3];
+  p.hf[0] = a[4] + o[4];
+  p.hf[1] = a[5] + o[5];
+  p.hb[0] = a[6] + o[6];
+  p.hb[1] = a[7] + o[7];
+  p.ff[0] = a[8] + o[8];
+  p.ff[1] = Math.max(0, a[9] + o[9]);
+  p.fb[0] = a[10] + o[10];
+  p.fb[1] = Math.max(0, a[11] + o[11]);
+  p.rot = a[12] + o[12];
+  p.w = a[13] !== a[13] ? null : a[13] + o[13];
+  p.w2 = a[14] !== a[14] ? null : a[14] + o[14];
+  p.wl = a[15] + o[15];
+}
+
+// Foot offset along a step cycle. ph in cycles; the foot is planted (sliding back
+// exactly as fast as the body moves) for `duty` of the cycle, then swings forward.
+function stepFoot(ph, stride, lift, duty) {
+  ph -= Math.floor(ph);
+  if (ph < duty) return [stride * (0.5 - ph / duty), 0];
+  const t = (ph - duty) / (1 - duty);
+  return [stride * (ease.inOut(t) - 0.5), lift * Math.sin(Math.PI * t)];
+}
+
+// Running stride: short ground contact, the heel kicks up behind before reaching forward.
+export const RUN_STRIDE = 64, RUN_DUTY = 0.36;
+function runFoot(ph) {
+  ph -= Math.floor(ph);
+  if (ph < RUN_DUTY) return [RUN_STRIDE * (0.5 - ph / RUN_DUTY), 0];
+  const t = (ph - RUN_DUTY) / (1 - RUN_DUTY);
+  const x = RUN_STRIDE * (ease.inOut(t) - 0.5);
+  const y = 34 * Math.sin(Math.PI * Math.min(1, t * 1.15)) * (1 - t * 0.35);
+  return [x, Math.max(0, y)];
+}
+
 export class Fighter {
   constructor(def, opts) {
     this.def = def;
@@ -49,6 +144,14 @@ export class Fighter {
     this.pose = makePose();
     this.tmpPose = makePose();
     this.prevPose = makePose();
+    this.rpose = makePose(); // rendered pose (springs + impulses on top of this.pose)
+    this.aT = new Float64Array(NP);
+    this.aX = new Float64Array(NP);
+    this.aV = new Float64Array(NP);
+    this.aO = new Float64Array(NP);
+    this.aOV = new Float64Array(NP);
+    this.animInit = false;
+    this.snapPose = false;
     this.J = {};
     this.hurt = [];
     this.stats = { dealt: 0, taken: 0, maxCombo: 0, parries: 0, blocks: 0, hits: 0, specials: 0, ults: 0, breakers: 0, throws: 0 };
@@ -113,6 +216,11 @@ export class Fighter {
     this.ghostT = 0;
     this.noPush = 0;
     this.emote = null;
+    this.spin = 0;
+    this.spinV = 0;
+    this.animInit = false;
+    this.aO.fill(0);
+    this.aOV.fill(0);
     this.acc.reset();
   }
 
@@ -144,9 +252,9 @@ export class Fighter {
   }
 
   setState(s) {
-    if (this.state !== s) {
-      copyPose(this.pose, this.prevPose);
-      this.blend = s === 'attack' ? 3 : s === 'hitstun' || s === 'juggle' ? 1 : 5;
+    if (this.state !== s || s === 'attack') {
+      copyPose(this.animInit ? this.rpose : this.pose, this.prevPose);
+      this.blend = s === 'attack' ? 3 : 0;
     }
     this.state = s;
     this.stateT = 0;
@@ -248,6 +356,7 @@ export class Fighter {
   // ------------------------------------------------------------------ main tick
   tick() {
     const inp = this.ctrl;
+    if (this.flash > 0) this.flash--; // white impact flash: first frames of the freeze only
     if (this.hitstop > 0) {
       this.hitstop--;
       inp.freezeBuffer(); // buffered presses don't age during hit-freeze
@@ -256,7 +365,6 @@ export class Fighter {
     this.stateT++;
     if (this.invuln > 0) this.invuln--;
     if (this.armor > 0) this.armor--;
-    if (this.flash > 0) this.flash--;
     if (this.counterWin > 0) this.counterWin--;
     if (this.parryRecoil > 0) this.parryRecoil--;
     if (this.techWindow > 0) this.techWindow--;
@@ -430,14 +538,14 @@ export class Fighter {
     if (dir !== 0) {
       if (this.state === 'run' && fwd > 0) {
         this.vx = this.facing * 7.6 * this.speedMult;
-        this.walkPhase += 0.2;
+        this.walkPhase += (Math.abs(this.vx) * RUN_DUTY) / RUN_STRIDE;
         if (this.stateT % 6 === 0) W.fx.dust(this.x - this.facing * 10, 0, 1, -this.facing, undefined, 0.6);
         return;
       }
       if (this.state !== 'walk') this.setState('walk');
       const sp = (fwd > 0 ? 4.4 : 3.5) * this.speedMult;
       this.vx = approach(this.vx, dir * sp, 1.4);
-      this.walkPhase += Math.abs(this.vx) * 0.045;
+      this.walkPhase += Math.abs(this.vx) / 48;
       if (this.stateT % 16 === 8) W.sfx('step', { vol: 0.5, pan: this.pan() });
     } else {
       if (this.state !== 'idle') this.setState('idle');
@@ -537,6 +645,7 @@ export class Fighter {
     this.airJumps = 1;
     this.airDashes = 1;
     this.setState('air');
+    this.shove(A.hipY, 0, 4);
     this.world.sfx('jump', { pan: this.pan() });
     this.world.fx.dust(this.x, 0, 4, 0, undefined, 0.7);
   }
@@ -705,6 +814,11 @@ export class Fighter {
 
   juggleState(inp) {
     if (this.stun > 0) this.stun--;
+    // tumble: spin decays toward a pose that follows the arc (head back on the way up, flat on the way down)
+    const base = lerp(-22, -84, clamp((this.vy + 6) / 14, 0, 1));
+    this.spinV += wrapDeg(base - this.spin) * 0.06;
+    this.spinV *= 0.9;
+    this.spin += this.spinV;
     this.checkBreaker(inp);
     if (this.state !== 'juggle') return;
     // air recovery once stun expired
@@ -783,7 +897,12 @@ export class Fighter {
       let g = grav;
       if (this.state === 'attack' && this.move && this.move.gravity != null) g *= this.move.gravity;
       if (this.state === 'juggle') g *= 1 + Math.min(0.6, this.juggleHits * 0.05);
-      if (this.state === 'air' && this.ctrl.held.down && this.vy > -3) g *= 1.7; // fast fall
+      if (this.state === 'air') {
+        // snappier arc: a brief hang at the apex, then a heavier fall
+        if (Math.abs(this.vy) < 2.5) g *= 0.8;
+        else if (this.vy > 0) g *= 1.12;
+        if (this.ctrl.held.down && this.vy > -3) g *= 1.7; // fast fall
+      }
       if (this.state === 'burst') g *= 0.3;
       if (this.state === 'frozen') g *= 1;
       this.vy += g;
@@ -835,6 +954,8 @@ export class Fighter {
         this.grounded = true;
         this.setState('land');
         this.landLag = 4;
+        this.shove(A.hipY, -clamp(impactVy * 0.6, 3, 12));
+        this.shove(A.lean, clamp(impactVy * 0.4, 2, 8));
         W.sfx('land', { pan: this.pan(), vol: 0.7 });
         W.fx.dust(this.x, 0, 4, 0, undefined, 0.8);
         this.faceOpponent();
@@ -877,7 +998,9 @@ export class Fighter {
     const W = this.world;
     this.grounded = true;
     this.setState('knockdown');
-    this.blend = 2;
+    this.shove(A.hipY, 0, clamp(impactVy * 0.5, 2, 7));
+    this.shove(A.head, -10, 3);
+    this.shove(A.hfY, 0, 6);
     this.kdTime = 34;
     this.vx *= 0.5;
     this.vy = 0;
@@ -894,111 +1017,160 @@ export class Fighter {
   }
 
   // ------------------------------------------------------------------ animation
+  // Target pose for the current state (logic), written into this.pose.
   computePose() {
     const out = this.tmpPose;
     const t = this.world ? this.world.time : 0;
     const set = this.def.poseSet;
+    const stance = POSES[set.stance];
     switch (this.state) {
       case 'attack': {
         sampleKeys(this.move.keys, Math.min(this.moveF, this.move.dur), out);
         break;
       }
-      case 'idle':
-      case 'jumpsquat': {
-        copyPose(POSES[this.state === 'jumpsquat' ? 'crouch' : set.stance], out);
-        if (this.state === 'idle') {
-          const b = Math.sin(t * 0.075 + this.side) * 1.6;
-          out.hip[1] += b;
-          out.hf[1] += b * 0.8;
-          out.hb[1] += b * 0.6;
-          out.lean += b * 0.4;
-        }
+      case 'idle': {
+        copyPose(stance, out);
+        // fighting bounce: knees flex, chest and fists follow a beat later
+        const tired = this.tired ? 1 : 0;
+        const ph = t * (tired ? 0.11 : 0.085) + this.side * 2.1;
+        const amp = tired ? 3.2 : 2.2;
+        out.hip[1] += Math.sin(ph) * amp - 0.6 - tired * 6;
+        out.lean += Math.sin(ph - 0.6) * 1.3 + tired * 9;
+        out.head += Math.sin(ph - 1.2) * 1.6 + tired * 6;
+        out.hf[0] += Math.sin(ph - 0.9) * 0.9 - tired * 6;
+        out.hf[1] += Math.sin(ph - 0.9) * 2.2 - tired * 16;
+        out.hb[1] += Math.sin(ph - 1.15) * 2.2 - tired * 14;
         break;
       }
+      case 'jumpsquat':
+        copyPose(POSES.crouch, out);
+        break;
       case 'walk': {
-        const ph = Math.sin(this.walkPhase);
-        lerpPose(POSES.walkA, POSES.walkB, ph * 0.5 + 0.5, out);
-        if (set.stance !== 'stance') {
-          const st = POSES[set.stance];
-          out.hf[0] = st.hf[0];
-          out.hf[1] = st.hf[1];
-          out.hb[0] = st.hb[0];
-          out.hb[1] = st.hb[1];
-          out.w = st.w;
-        }
-        // moving backwards: lean back a little
-        if (this.vx * this.facing < 0) out.lean -= 8;
-        out.hip[1] += Math.abs(Math.cos(this.walkPhase)) * 2;
+        copyPose(stance, out);
+        // fighting-stance shuffle: each foot is planted while the body moves over it
+        const fwd = this.vx * this.facing >= 0 ? 1 : -1;
+        const ph = this.walkPhase;
+        const [fx, fy] = stepFoot(ph, 24, 9, 0.5);
+        const [bx, by] = stepFoot(ph + 0.5, 24, 9, 0.5);
+        out.ff[0] = stance.ff[0] + fx * fwd;
+        out.ff[1] = fy;
+        out.fb[0] = stance.fb[0] + bx * fwd;
+        out.fb[1] = by;
+        out.hip[1] += -2 * Math.cos(ph * Math.PI * 4) - 1;
+        out.hip[0] += fwd * 2;
+        out.lean += fwd > 0 ? 3 : -5;
+        out.hf[1] += Math.sin(ph * Math.PI * 4) * 1.5;
+        out.hb[1] += Math.sin(ph * Math.PI * 4 - 0.6) * 1.5;
         break;
       }
       case 'run': {
-        const ph = Math.sin(this.walkPhase * 1.4);
         copyPose(POSES.dash, out);
-        out.ff[0] = 30 * ph;
-        out.ff[1] = Math.max(0, 16 * Math.cos(this.walkPhase * 1.4));
-        out.fb[0] = -30 * ph;
-        out.fb[1] = Math.max(0, -16 * Math.cos(this.walkPhase * 1.4));
-        out.hip[1] = 70 + Math.abs(ph) * 3;
-        out.lean = 24;
+        const ph = this.walkPhase;
+        const [fx, fy] = runFoot(ph);
+        const [bx, by] = runFoot(ph + 0.5);
+        out.ff[0] = 8 + fx;
+        out.ff[1] = fy;
+        out.fb[0] = 8 + bx;
+        out.fb[1] = by;
+        // ninja run: arms trail behind, chest low and forward
+        out.hip[0] = 2;
+        out.hip[1] = 76 + 3.5 * Math.sin(Math.PI * 4 * (ph - 0.305));
+        out.lean = 24 + 2 * Math.sin(Math.PI * 4 * (ph - 0.1));
+        out.head = -12;
+        out.hf[0] = -40;
+        out.hf[1] = -16 + Math.sin(Math.PI * 4 * ph) * 3;
+        out.hb[0] = -48;
+        out.hb[1] = -8 + Math.sin(Math.PI * 4 * ph - 0.8) * 3;
         break;
       }
-      case 'dash':
+      case 'dash': {
         copyPose(POSES.dash, out);
+        const k = clamp(this.stateT / 10, 0, 1);
+        out.lean += (1 - k) * 8;
+        out.ff[0] += Math.sin(this.stateT * 0.6) * 6;
         break;
+      }
       case 'backdash':
         copyPose(POSES.backdash, out);
+        if (this.stateT < 10) {
+          out.ff[1] = 14 * Math.sin((this.stateT / 10) * Math.PI);
+          out.fb[1] = 8 * Math.sin((this.stateT / 10) * Math.PI);
+        }
         break;
       case 'land':
-        lerpPose(POSES.land, POSES[set.stance], clamp(this.stateT / Math.max(4, this.landLag || 4), 0, 1), out);
+        lerpPose(POSES.land, stance, ease.out(clamp(this.stateT / Math.max(4, this.landLag || 4), 0, 1)), out);
         break;
       case 'air': {
-        const k = clamp((this.vy + 8) / 16, 0, 1);
-        lerpPose(POSES.jumpUp, POSES.fall, k, out);
+        const vy = this.vy;
+        if (vy < 0) lerpPose(POSES.jumpTuck, POSES.jumpStretch, ease.in(clamp(-vy / 17, 0, 1)), out);
+        else lerpPose(POSES.jumpTuck, POSES.fall, ease.out(clamp(vy / 13, 0, 1)), out);
+        out.lean += clamp(this.vx * this.facing, -6, 6) * 1.4;
         if (this.flipT > 0) {
           const p = 1 - this.flipT / 22;
-          lerpPose(out, POSES.flipTuck, Math.sin(p * Math.PI), out);
+          lerpPose(out, POSES.flipTuck, Math.sin(clamp(p, 0, 1) * Math.PI), out);
           out.rot = 360 * ease.inOut(clamp(p, 0, 1));
+        }
+        if (this.airDashT > 0) {
+          copyPose(POSES.dash, out);
+          out.ff[1] = 24;
+          out.fb[1] = 34;
+          out.hip[1] = 80;
         }
         if (this.wallSide && this.vy > 0) copyPose(POSES.wallCling, out);
         break;
       }
-      case 'block':
+      case 'block': {
         copyPose(POSES[set.block], out);
+        out.hip[1] += Math.sin(t * 0.08 + this.side) * 0.8;
         break;
+      }
       case 'blockstun':
         copyPose(POSES[set.blockHit], out);
         break;
       case 'hitstun':
       case 'parried': {
-        const k = clamp(this.stun / 10, 0, 1);
-        lerpPose(POSES[set.stance], POSES[this.state === 'parried' ? 'hurtHigh' : this.hurtPose], k, out);
-        if (this.state === 'parried') out.lean -= 10;
+        const k = ease.smooth(clamp(this.stun / 12, 0, 1));
+        lerpPose(stance, POSES[this.state === 'parried' ? 'parried' : this.hurtPose], k, out);
         break;
       }
       case 'juggle': {
-        copyPose(this.vy < 0 ? POSES.hurtAir : POSES.tumble, out);
-        out.rot = -clamp(this.stateT * 9 * (Math.abs(this.vx) > 3 ? 1 : 0.5), 0, 300) * (this.spinDir || 1);
-        if (this.y > -60 && this.vy > 0) out.rot = lerp(out.rot, -80, 0.5);
+        // limbs trail behind while the body tumbles; curl up during fast spins
+        const curl = clamp(0.3 + Math.abs(this.spinV) / 11, 0, 1);
+        lerpPose(POSES.hurtAir, POSES.tumble, curl, out);
+        const w = Math.sin(t * 0.45 + this.side);
+        out.hf[0] += w * 7;
+        out.hf[1] += Math.cos(t * 0.38) * 6;
+        out.hb[0] -= w * 6;
+        out.ff[1] += Math.sin(t * 0.33) * 6;
+        out.fb[0] += Math.cos(t * 0.41) * 5;
+        out.rot = this.spin;
         break;
       }
-      case 'knockdown':
+      case 'knockdown': {
         copyPose(POSES.lying, out);
-        out.hip[1] += Math.max(0, 6 - this.stateT) * 2;
+        // limbs settle after the impact
+        const k = clamp(1 - this.stateT / 14, 0, 1);
+        out.hf[1] += k * 16;
+        out.ff[1] += k * 10;
+        out.hb[1] += k * 10;
         break;
+      }
       case 'getup': {
         const p = this.stateT / 18;
-        if (p < 0.5) lerpPose(POSES.lying, POSES.getupKneel, p * 2, out);
-        else lerpPose(POSES.getupKneel, POSES[set.stance], (p - 0.5) * 2, out);
+        if (p < 0.45) lerpPose(POSES.lying, POSES.getupSit, ease.out(p / 0.45), out);
+        else if (p < 0.75) lerpPose(POSES.getupSit, POSES.getupKneel, ease.smooth((p - 0.45) / 0.3), out);
+        else lerpPose(POSES.getupKneel, stance, ease.out((p - 0.75) / 0.25), out);
         break;
       }
       case 'dizzy': {
         copyPose(POSES.dizzy, out);
         out.lean += Math.sin(t * 0.12) * 10;
         out.hip[0] += Math.sin(t * 0.12) * 6;
+        out.head += Math.sin(t * 0.12 - 0.8) * 12;
         break;
       }
       case 'frozen':
-        break; // keep pose
+        return; // keep pose
       case 'grabbed':
         copyPose(POSES.grabbed, out);
         if (this.grabRot) out.rot = this.grabRot;
@@ -1012,37 +1184,114 @@ export class Fighter {
         copyPose(POSES.aura, out);
         break;
       case 'cine':
-        copyPose(this.cinePose || POSES[set.stance], out);
+        copyPose(this.cinePose || stance, out);
         break;
       case 'intro': {
         const intro = this.def.introPose || 'victoryBow';
         const p = clamp(this.stateT / 50, 0, 1);
-        lerpPose(POSES[set.stance], POSES[intro], Math.sin(p * Math.PI), out);
+        lerpPose(stance, POSES[intro], Math.sin(p * Math.PI), out);
         break;
       }
       case 'victory': {
         const vp = POSES[this.def.victoryPose || set.victory];
-        lerpPose(POSES[set.stance], vp, clamp(this.stateT / 16, 0, 1), out);
+        lerpPose(stance, vp, ease.back(clamp(this.stateT / 18, 0, 1)), out);
         out.hip[1] += Math.sin(t * 0.1) * 1.5;
         break;
       }
       case 'defeat':
-        lerpPose(POSES.hurtMid, POSES.defeatKneel, clamp(this.stateT / 30, 0, 1), out);
+        lerpPose(POSES.hurtMid, POSES.defeatKneel, ease.out(clamp(this.stateT / 30, 0, 1)), out);
         break;
       default:
-        copyPose(POSES[set.stance], out);
+        copyPose(stance, out);
     }
-    if (this.state === 'frozen') return;
-    if (this.blend > 0) {
-      const maxB = this.state === 'attack' ? 3 : 5;
-      lerpPose(this.prevPose, out, 1 - this.blend / maxB, this.pose);
+    if (this.blend > 0 && this.state === 'attack') {
+      lerpPose(this.prevPose, out, 1 - this.blend / 3, this.pose);
     } else copyPose(out, this.pose);
+    this.animate();
+  }
+
+  // Render pose: springs follow the target pose, plus decaying impulse offsets
+  // (hit whips, landing squash). Attacks are frame-exact; everything else eases.
+  animate() {
+    const T = this.aT, X = this.aX, V = this.aV, O = this.aO, OV = this.aOV;
+    packPose(this.pose, T);
+    const frozen = this.hitstop > 0 && !this.snapPose;
+    if (!this.animInit || this.snapPose) {
+      for (let i = 0; i < NP; i++) {
+        X[i] = T[i];
+        V[i] = 0;
+      }
+      this.animInit = true;
+      this.snapPose = false;
+    } else if (!frozen) {
+      const locked = this.state === 'attack' || this.state === 'cine';
+      const sp = SPRINGS[this.state] || SPRINGS.default;
+      const fast = this.stateT < 4 && (this.state === 'air' || this.state === 'land' || this.state === 'jumpsquat');
+      const k = fast ? 0.42 : sp[0], d = fast ? 0.3 : sp[1];
+      for (let i = 0; i < NP; i++) {
+        const ti = T[i];
+        if (ti !== ti) {
+          // no weapon angle on this pose
+          X[i] = NaN;
+          V[i] = 0;
+          continue;
+        }
+        if (X[i] !== X[i]) {
+          X[i] = ti;
+          V[i] = 0;
+          continue;
+        }
+        let diff = ti - X[i];
+        if (ANGLE[i]) diff = wrapDeg(diff);
+        if (locked) {
+          V[i] = clamp(diff, -7, 7);
+          X[i] = ti;
+        } else {
+          V[i] = V[i] * d + diff * k;
+          X[i] += V[i];
+        }
+      }
+      for (let i = 0; i < NP; i++) {
+        if (O[i] === 0 && OV[i] === 0) continue;
+        OV[i] = OV[i] * 0.6 - O[i] * 0.25;
+        O[i] += OV[i];
+        if (Math.abs(O[i]) < 0.05 && Math.abs(OV[i]) < 0.05) O[i] = OV[i] = 0;
+      }
+    }
+    unpackPose(X, O, this.rpose);
+  }
+
+  // Impulse helpers: displacement shows at once (even during hit-freeze), velocity next frame.
+  shove(i, dx, dv = 0) {
+    this.aO[i] += dx;
+    this.aOV[i] += dv;
+  }
+
+  // Visual reaction to a clean hit. dir: +1 if the hit pushes toward the defender's back.
+  hitReact(high, power) {
+    const m = clamp(power, 0.5, 1.8);
+    this.snapPose = true;
+    if (high) {
+      this.shove(A.head, -20 * m);
+      this.shove(A.lean, -10 * m);
+      this.shove(A.hfX, -8 * m, 2);
+      this.shove(A.hfY, 10 * m);
+      this.shove(A.hbX, -10 * m);
+      this.shove(A.hbY, 12 * m);
+    } else {
+      this.shove(A.lean, 12 * m);
+      this.shove(A.head, 12 * m);
+      this.shove(A.hipX, -6 * m);
+      this.shove(A.hipY, -5 * m);
+      this.shove(A.hfX, -10 * m);
+      this.shove(A.hbX, -8 * m);
+    }
   }
 
   solve() {
     let ox = this.x, oy = this.y;
     if (this.hitstop > 0 && this.hitShake > 0) ox += (this.hitstop % 2 ? 1 : -1) * this.hitShake;
-    solvePose(this.pose, ox, oy, this.facing, this.scale, this.weapon, this.J);
+    solvePose(this.rpose, ox, oy, this.facing, this.scale, this.weapon, this.J);
     hurtCapsules(this.J, this.hurt);
     return this.J;
   }
@@ -1082,6 +1331,8 @@ export class Fighter {
       weapon: this.weapon,
       flash: this.flash > 0,
       time: this.world ? this.world.time : 0,
+      expr: EXPR[this.state] || 'normal',
+      rim: this.world?.arena?.def?.rim,
     };
   }
 }

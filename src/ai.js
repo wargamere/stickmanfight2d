@@ -32,6 +32,8 @@ export class AI {
     this.setLevel(level);
     this.held = { left: false, right: false, up: false, down: false, atk: false, spc: false, ult: false, dash: false, grab: false };
     this.taps = new Set();
+    this.stepT = 0;
+    this.stepDir = 0;
     this.cool = {};
     for (const b of BTNS) this.cool[b] = 0;
     this.hist = [];
@@ -292,8 +294,17 @@ export class AI {
       } else this.tap('dash');
       return;
     }
-    // footsies: small steps
-    this.dir = chance(0.6) ? (dist > range ? toward : -toward) : 0;
+    // footsies: commit to a short step, feint or pause so movement reads as deliberate
+    if (this.stepT > 0) {
+      this.stepT--;
+      this.dir = this.stepDir;
+      return;
+    }
+    const want = dist > range ? toward : -toward;
+    const r = Math.random();
+    this.stepDir = r < 0.5 ? want : r < 0.68 ? -want : 0;
+    this.stepT = Math.round(rand(8, 22));
+    this.dir = this.stepDir;
   }
 
   idealRange() {

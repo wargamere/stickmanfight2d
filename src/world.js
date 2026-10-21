@@ -1,7 +1,7 @@
 // World: the fight simulation (fighters, entities, combat, cinematics) and
 // its rendering. Match flow (rounds, timer, announcer) lives in match.js.
 
-import { clamp, lerp, rand, sign, capsuleHit, chance } from './util.js';
+import { clamp, lerp, rand, sign, capsuleHit } from './util.js';
 import { Effects, SPARK_COLORS } from './effects.js';
 import { Camera } from './camera.js';
 import { Ragdoll } from './ragdoll.js';
@@ -319,6 +319,9 @@ export class World {
         this.guardBreak(def, att);
       } else {
         def.setState('blockstun');
+        def.snapPose = true;
+        def.shove(2, -clamp(h.dmg / 8, 2, 8));
+        def.shove(0, -clamp(h.dmg / 10, 1, 6));
         def.stun = h.bstun ?? Math.round((h.stun ?? 16) * 0.72);
         def.vx = kbDir * Math.max(2.5, (h.kb?.[0] ?? 3) * 0.8);
         if (!proj && Math.abs(def.x) > ARENA_HALF - 40) att.vx = -kbDir * 4;
@@ -417,12 +420,8 @@ export class World {
     this.shake(shake);
     if (h.dmg >= 60) this.cam.kick(kbDir * 6, -3);
     if (h.dmg >= 55) this.arenaImpact(cx, cy, clamp(h.dmg / 120, 0.2, 0.9));
-    if (this.settings.damageNumbers !== false) {
-      this.fx.text(cx + rand(-14, 14), cy - 30, String(dmg), {
-        size: clamp(18 + dmg / 4, 18, 42), color: dmg >= 60 ? '#ffb347' : '#ffffff', life: 40, vy: -2,
-      });
-    }
-    if (tag) this.fx.text(def.x, def.y - 215 * def.scale, tag, { color: tag === 'PUNISH' ? '#ff9a5c' : '#ffe066', size: 28 });
+    this.damageNumber(def, cx, cy - 34, dmg);
+    if (tag) this.fx.text(def.x, def.y - 215 * def.scale, tag, { color: tag === 'PUNISH' ? '#ff9a5c' : '#ffe066', size: 22, life: 34, vy: -0.8 });
 
     // reaction
     if (def.state === 'attack' && def.move?.until === 'land') def.move = null;
@@ -477,13 +476,18 @@ export class World {
         def.gbPending = true;
         def.gbOk = false;
       }
-      def.spinDir = chance(0.5) ? 1 : -1;
+      // tumble: knocked backwards, harder hits spin further
+      if (!wasAirborne) def.spin = 0;
+      def.spinV = Math.min(def.spinV, 0) - (Math.abs(kbx) * 0.9 + Math.max(0, -kby) * 0.25 + (h.kd ? 6 : 1.5));
+      def.hitReact(cy < def.J.neckY + 12 * def.scale, h.dmg / 40);
       if (def.y >= -1) def.y = -2;
     } else {
       def.setState('hitstun');
       def.stun = stun;
       def.vx = kbx;
-      def.hurtPose = chance(0.5) ? 'hurtHigh' : 'hurtMid';
+      const high = cy < def.J.neckY + 12 * def.scale;
+      def.hurtPose = high ? 'hurtHigh' : 'hurtMid';
+      def.hitReact(high, h.dmg / 40);
       if (!proj && Math.abs(def.x) > ARENA_HALF - 45) att.vx = -kbDir * Math.abs(kbx) * 0.7;
       if (h.kd) {
         def.kdOnLand = true;
@@ -491,6 +495,26 @@ export class World {
     }
     this.emit('hit', att, def, h, dmg, tag);
     return 'hit';
+  }
+
+  // One number per combo that counts up, instead of a pile of overlapping numbers.
+  damageNumber(def, x, y, dmg) {
+    if (this.settings.damageNumbers === false) return;
+    const t = def.dmgText;
+    if (t && t.age < t.life && def.comboHits > 1 && this.fx.texts.includes(t)) {
+      t.total += dmg;
+      t.str = String(t.total);
+      t.age = 0;
+      t.x = lerp(t.x, x, 0.5);
+      t.y = y;
+      t.size = clamp(16 + t.total / 8, 16, 34);
+      t.color = t.total >= 150 ? '#ffb347' : '#ffffff';
+      return;
+    }
+    def.dmgText = this.fx.text(x + rand(-10, 10), y, String(dmg), {
+      size: clamp(16 + dmg / 6, 16, 30), color: dmg >= 60 ? '#ffb347' : '#ffffff', life: 32, vy: -0.8,
+    });
+    def.dmgText.total = dmg;
   }
 
   guardBreak(def, att) {
@@ -1117,7 +1141,8 @@ export class Cine {
     if (o.elem === 'ice') this.fx.shards(x, y, 4, '#bff4ff', 0.6);
     this.world.sfx(o.sfx || 'hitMedium', { pan: def.pan(), vol: o.vol ?? 0.9 });
     this.world.shake(o.shake ?? 0.08);
-    if (this.world.settings.damageNumbers !== false) this.fx.text(x, y - 20, String(dmg), { size: 20, color: '#fff', life: 30 });
+    this.world.damageNumber(def, x, y - 20, dmg);
+    def.hitReact(y < def.J.neckY + 12 * def.scale, (o.dmg || 10) / 30);
     if (o.stop) def.hitstop = att.hitstop = o.stop;
   }
   final(o = {}) {

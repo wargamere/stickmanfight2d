@@ -21,8 +21,8 @@ const PIECES = {
     anchor(J, i) {
       const h = headFrame(J);
       const r = J.headR;
-      const bx = J.headX - h.fx * r * 0.9 + h.upx * r * 0.25;
-      const by = J.headY - h.fy * r * 0.9 + h.upy * r * 0.25;
+      const bx = J.headX - h.fx * r * 0.85 + h.upx * r * 0.5;
+      const by = J.headY - h.fy * r * 0.85 + h.upy * r * 0.5;
       return [bx + (i ? h.upx * 3 : 0), by + (i ? h.upy * 3 : 0)];
     },
     behind(ctx, J, look, acc) {
@@ -32,12 +32,13 @@ const PIECES = {
       const h = headFrame(J);
       const r = J.headR;
       ctx.save();
-      ctx.translate(J.headX + h.upx * r * 0.25, J.headY + h.upy * r * 0.25);
+      ctx.translate(J.headX + h.upx * r * 0.5, J.headY + h.upy * r * 0.5);
       ctx.rotate(Math.atan2(h.upy, h.upx) + Math.PI / 2);
+      const hw = Math.sqrt(1 - 0.25) * r; // half chord of the head circle at this height
       ctx.fillStyle = look.outline;
-      ctx.fillRect(-r - 2, -4.5 * J.scale, 2 * r + 4, 9 * J.scale);
+      ctx.fillRect(-hw - 2, -3.8 * J.scale, 2 * hw + 4, 7.6 * J.scale);
       ctx.fillStyle = look.flash ? '#fff' : look.accent;
-      ctx.fillRect(-r - 0.5, -3 * J.scale, 2 * r + 1, 6 * J.scale);
+      ctx.fillRect(-hw - 0.5, -2.4 * J.scale, 2 * hw + 1, 4.8 * J.scale);
       ctx.restore();
     },
   },

@@ -4,7 +4,7 @@
 // y points UP, origin is the ground point under the fighter. Hands are relative
 // to the shoulder, feet relative to the origin. World space has y pointing down.
 
-import { DEG, clamp, lerp, shade, rgba } from './util.js';
+import { DEG, TAU, clamp, lerp, shade, rgba } from './util.js';
 
 export const BONES = {
   spine: 50,
@@ -163,6 +163,7 @@ export function solvePose(pose, ox, oy, facing, scale, weapon, out = {}) {
   out.scale = s;
   out.rot = pose.rot;
   out.lean = pose.lean;
+  out.baseY = oy;
   // weapons (angles in world: convert facing-space angle with rotation)
   const worldAng = (a) => {
     const fa = (a - pose.rot) * DEG;
@@ -481,20 +482,233 @@ export function drawWeapon(ctx, J, weapon, look, which = 1) {
   ctx.restore();
 }
 
-// look: { color, outline, accent, lineW, flash, alpha, weapon, accessory, eye, time, glow }
+// Tapered capsule: circle (ax, ay, ra) joined to circle (bx, by, rb) by outer tangents.
+function capsulePath(ctx, ax, ay, bx, by, ra, rb) {
+  const dx = bx - ax, dy = by - ay;
+  const d = Math.hypot(dx, dy);
+  if (d <= Math.abs(ra - rb) + 0.01) {
+    const r = Math.max(ra, rb);
+    const cx = ra >= rb ? ax : bx, cy = ra >= rb ? ay : by;
+    ctx.moveTo(cx + r, cy);
+    ctx.arc(cx, cy, r, 0, TAU);
+    return;
+  }
+  const ang = Math.atan2(dy, dx);
+  const th = Math.acos(clamp((ra - rb) / d, -1, 1));
+  ctx.moveTo(ax + Math.cos(ang + th) * ra, ay + Math.sin(ang + th) * ra);
+  ctx.arc(ax, ay, ra, ang + th, ang + TAU - th);
+  ctx.arc(bx, by, rb, ang - th, ang + th);
+  ctx.closePath();
+}
+
+// Body proportions (radii in px at lineW 7, scale 1)
+const R = {
+  waist: 5.6, chest: 7.2, neck: 3.4,
+  uarm0: 4.5, uarm1: 3.7, larm1: 3.1, fist: 5.3,
+  thigh0: 5.4, thigh1: 4.1, shin1: 3.2, foot0: 3.3, foot1: 2.7, footLen: 12,
+};
+const LIGHT_X = -0.42, LIGHT_Y = -0.91; // key light from the upper left
+
+// A soft highlight down the lit side of a limb segment: reads as a rounded tube.
+function tubeLight(ctx, ax, ay, bx, by, ra, rb) {
+  const dx = bx - ax, dy = by - ay;
+  const d = Math.hypot(dx, dy) || 1;
+  const nx = -dy / d, ny = dx / d;
+  const facing = nx * LIGHT_X + ny * LIGHT_Y; // -1..1, sign = which side is lit
+  const o = facing * 0.42;
+  const ux = dx / d, uy = dy / d;
+  const a0 = ra * 0.4, b0 = rb * 0.4;
+  ctx.moveTo(ax + nx * ra * o + ux * a0, ay + ny * ra * o + uy * a0);
+  ctx.lineTo(bx + nx * rb * o - ux * b0, by + ny * rb * o - uy * b0);
+}
+
+// Direction of a foot: flat and forward when planted, pointed along the shin when lifted.
+function footDir(J, kx, ky, fx, fy) {
+  const f = J.facing || 1;
+  let dx = fx - kx, dy = fy - ky;
+  const d = Math.hypot(dx, dy) || 1;
+  dx /= d;
+  dy /= d;
+  const lift = J.baseY != null ? clamp((J.baseY - fy) / (26 * J.scale), 0, 1) : 0;
+  const g = 1 - lift * 0.8;
+  const px = f * dy, py = -f * dx; // perpendicular, pointing forward
+  let ox = lerp(dx, px, g), oy = lerp(dy, py, g);
+  const m = Math.hypot(ox, oy) || 1;
+  return [ox / m, oy / m];
+}
+
+function limbPath(ctx, J, k, which, part) {
+  // part: 'arm' | 'leg'
+  if (part === 'arm') {
+    const ex = J['elbow' + which + 'X'], ey = J['elbow' + which + 'Y'];
+    const hx = J['hand' + which + 'X'], hy = J['hand' + which + 'Y'];
+    capsulePath(ctx, J.neckX, J.neckY, ex, ey, R.uarm0 * k, R.uarm1 * k);
+    capsulePath(ctx, ex, ey, hx, hy, R.uarm1 * k, R.larm1 * k);
+  } else {
+    const kx = J['knee' + which + 'X'], ky = J['knee' + which + 'Y'];
+    const fx = J['foot' + which + 'X'], fy = J['foot' + which + 'Y'];
+    capsulePath(ctx, J.hipX, J.hipY, kx, ky, R.thigh0 * k, R.thigh1 * k);
+    capsulePath(ctx, kx, ky, fx, fy, R.thigh1 * k, R.shin1 * k);
+    const [dx, dy] = footDir(J, kx, ky, fx, fy);
+    const L = R.footLen * k;
+    capsulePath(ctx, fx - dx * 2 * k, fy - dy * 2 * k, fx + dx * L, fy + dy * L, R.foot0 * k, R.foot1 * k);
+  }
+}
+
+function limbLights(ctx, J, k, which, part) {
+  if (part === 'arm') {
+    const ex = J['elbow' + which + 'X'], ey = J['elbow' + which + 'Y'];
+    tubeLight(ctx, J.neckX, J.neckY, ex, ey, R.uarm0 * k, R.uarm1 * k);
+    tubeLight(ctx, ex, ey, J['hand' + which + 'X'], J['hand' + which + 'Y'], R.uarm1 * k, R.larm1 * k);
+  } else {
+    const kx = J['knee' + which + 'X'], ky = J['knee' + which + 'Y'];
+    tubeLight(ctx, J.hipX, J.hipY, kx, ky, R.thigh0 * k, R.thigh1 * k);
+    tubeLight(ctx, kx, ky, J['foot' + which + 'X'], J['foot' + which + 'Y'], R.thigh1 * k, R.shin1 * k);
+  }
+}
+
+// Draw one body part: outline, fill, lit edge, optional rim light.
+function bodyPart(ctx, J, k, pathFn, fill, look, lightFn) {
+  const ow = 2.3 * k * (look.outlineW || 1);
+  ctx.beginPath();
+  pathFn();
+  if (look.outline !== 'none') {
+    ctx.strokeStyle = look.outline;
+    ctx.lineWidth = ow * 2;
+    ctx.stroke();
+  }
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (look.flat || !lightFn) return;
+  ctx.beginPath();
+  lightFn();
+  ctx.strokeStyle = look.hi;
+  ctx.globalAlpha = (look.alpha ?? 1) * 0.42;
+  ctx.lineWidth = 2.2 * k;
+  ctx.stroke();
+  ctx.globalAlpha = look.alpha ?? 1;
+}
+
+function fistAt(ctx, J, k, which, look, fill) {
+  const hx = J['hand' + which + 'X'], hy = J['hand' + which + 'Y'];
+  const r = R.fist * k;
+  ctx.beginPath();
+  ctx.arc(hx, hy, r, 0, TAU);
+  if (look.outline !== 'none') {
+    ctx.strokeStyle = look.outline;
+    ctx.lineWidth = 4.6 * k;
+    ctx.stroke();
+  }
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (look.flat) return;
+  // knuckle highlight
+  ctx.fillStyle = look.flash ? '#fff' : 'rgba(255,255,255,0.35)';
+  ctx.beginPath();
+  ctx.arc(hx + LIGHT_X * r * 0.38, hy + LIGHT_Y * r * 0.38, r * 0.38, 0, TAU);
+  ctx.fill();
+}
+
+// Face, drawn in head space: +x toward the facing direction, +y down the head.
+function drawFace(ctx, J, look) {
+  const r = J.headR;
+  const s = J.scale;
+  let ux = J.headX - J.neckTopX, uy = J.headY - J.neckTopY;
+  const ul = Math.hypot(ux, uy) || 1;
+  ux /= ul;
+  uy /= ul;
+  const f = J.facing || 1;
+  ctx.save();
+  ctx.translate(J.headX, J.headY);
+  ctx.transform(-f * uy, f * ux, -ux, -uy, 0, 0);
+  const eye = look.eyeColor || '#fff';
+  const expr = look.expr || 'normal';
+  if (look.eyeShape === 'visor') {
+    ctx.fillStyle = look.outline === 'none' ? eye : look.outline;
+    ctx.fillRect(-r * 0.05, -r * 0.42, r * 1.02, r * 0.5);
+    ctx.fillStyle = eye;
+    const h = expr === 'hurt' || expr === 'ko' ? 0.1 : 0.24;
+    ctx.globalAlpha = (look.alpha ?? 1) * (expr === 'ko' ? 0.4 : 1);
+    ctx.fillRect(r * 0.08, -r * 0.17 - r * h * 0.5, r * 0.84, r * h);
+    ctx.restore();
+    return;
+  }
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  if (expr === 'ko') {
+    ctx.strokeStyle = look.outline === 'none' ? eye : look.outline;
+    ctx.lineWidth = 2.6 * s;
+    ctx.beginPath();
+    ctx.moveTo(r * 0.34, -r * 0.3);
+    ctx.lineTo(r * 0.74, r * 0.06);
+    ctx.moveTo(r * 0.74, -r * 0.3);
+    ctx.lineTo(r * 0.34, r * 0.06);
+    ctx.stroke();
+  } else if (expr === 'hurt') {
+    // squeezed-shut eye and an open mouth
+    ctx.strokeStyle = eye;
+    ctx.lineWidth = 2.4 * s;
+    ctx.beginPath();
+    ctx.moveTo(r * 0.8, -r * 0.26);
+    ctx.lineTo(r * 0.42, -r * 0.1);
+    ctx.lineTo(r * 0.8, r * 0.06);
+    ctx.stroke();
+    ctx.fillStyle = look.outline === 'none' ? eye : look.outline;
+    ctx.beginPath();
+    ctx.ellipse(r * 0.66, r * 0.48, r * 0.16, r * 0.2, 0, 0, TAU);
+    ctx.fill();
+  } else if (expr === 'happy') {
+    ctx.strokeStyle = eye;
+    ctx.lineWidth = 2.6 * s;
+    ctx.beginPath();
+    ctx.arc(r * 0.56, -r * 0.04, r * 0.24, Math.PI * 1.1, Math.PI * 1.9);
+    ctx.stroke();
+  } else {
+    // determined almond eye; narrower and angrier while attacking
+    const atk = expr === 'attack';
+    ctx.fillStyle = eye;
+    ctx.beginPath();
+    ctx.moveTo(r * 0.2, -r * (atk ? 0.16 : 0.26));
+    ctx.lineTo(r * 0.84, -r * (atk ? 0.0 : 0.08));
+    ctx.quadraticCurveTo(r * 0.8, r * 0.1, r * 0.58, r * 0.1);
+    ctx.quadraticCurveTo(r * 0.28, r * 0.1, r * 0.2, -r * (atk ? 0.06 : 0.1));
+    ctx.closePath();
+    ctx.fill();
+    if (!look.flat && !look.flash) {
+      ctx.fillStyle = look.outline === 'none' ? eye : look.outline;
+      ctx.beginPath();
+      ctx.arc(r * 0.64, -r * 0.03, r * 0.1, 0, TAU);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+// look: { color, outline, accent, lineW, flash, alpha, weapon, eye, expr, time, glow, rim, flat }
 export function drawStickman(ctx, J, look) {
   const s = J.scale;
+  const k = ((look.lineW || 7) / 7) * s;
   const lw = (look.lineW || 7) * s;
   const ol = look.outline || '#0b0b12';
   const col = look.flash ? '#ffffff' : look.color;
-  const back = look.flash ? '#e8e8e8' : look.backColor || shade(look.color, -0.32);
-  const olw = lw + 4.5 * s;
+  const back = look.flash ? '#e8e8e8' : look.backColor || shade(look.color, -0.3);
+  const acc = look.flash ? '#ffffff' : look.accent || col;
+  const accBack = look.flash ? '#e8e8e8' : shade(acc, -0.25);
+  const L = {
+    ...look,
+    outline: ol === 'rgba(0,0,0,0)' ? 'none' : ol,
+    hi: look.flash ? '#ffffff' : shade(look.color, 0.38),
+    alpha: look.alpha ?? 1,
+  };
+  const hiBack = look.flash ? '#ffffff' : shade(back, 0.3);
   ctx.save();
   if (look.alpha != null) ctx.globalAlpha = look.alpha;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
   const weapon = look.weapon;
+  const kind = weapon && weapon.kind;
+  const handGear = kind === 'gauntlet' || kind === 'claw' || kind === 'cannon';
   if (look.drawBehind) look.drawBehind(ctx, J, look);
   // back weapon (dual) behind body
   if (weapon && weapon.dual) drawWeapon(ctx, J, weapon, look, 2);
@@ -504,7 +718,7 @@ export function drawStickman(ctx, J, look) {
     ctx.save();
     ctx.globalAlpha = (look.alpha ?? 1) * look.glow.a;
     ctx.strokeStyle = look.glow.color;
-    ctx.lineWidth = olw + 10 * s;
+    ctx.lineWidth = lw + 15 * s;
     ctx.beginPath();
     seg(ctx, J.hipX, J.hipY, J.neckX, J.neckY);
     seg(ctx, J.neckX, J.neckY, J.elbowFX, J.elbowFY);
@@ -523,91 +737,90 @@ export function drawStickman(ctx, J, look) {
     ctx.restore();
   }
 
-  // ---- outline pass (everything) ----
-  ctx.strokeStyle = ol;
-  ctx.lineWidth = olw;
-  ctx.beginPath();
-  seg(ctx, J.neckX, J.neckY, J.elbowBX, J.elbowBY);
-  ctx.lineTo(J.handBX, J.handBY);
-  seg(ctx, J.hipX, J.hipY, J.kneeBX, J.kneeBY);
-  ctx.lineTo(J.footBX, J.footBY);
-  seg(ctx, J.hipX, J.hipY, J.kneeFX, J.kneeFY);
-  ctx.lineTo(J.footFX, J.footFY);
-  seg(ctx, J.neckX, J.neckY, J.elbowFX, J.elbowFY);
-  ctx.lineTo(J.handFX, J.handFY);
-  ctx.stroke();
-  ctx.lineWidth = olw + 2 * s;
-  ctx.beginPath();
-  seg(ctx, J.hipX, J.hipY, J.neckTopX, J.neckTopY);
-  ctx.stroke();
-  ctx.fillStyle = ol;
-  ctx.beginPath();
-  ctx.arc(J.headX, J.headY, J.headR + 2.6 * s, 0, Math.PI * 2);
-  ctx.fill();
+  const Lb = { ...L, hi: hiBack };
+  // ---- back arm, back leg
+  bodyPart(ctx, J, k, () => limbPath(ctx, J, k, 'B', 'arm'), back, Lb, () => limbLights(ctx, J, k, 'B', 'arm'));
+  if (!handGear) fistAt(ctx, J, k, 'B', L, accBack);
+  bodyPart(ctx, J, k, () => limbPath(ctx, J, k, 'B', 'leg'), back, Lb, () => limbLights(ctx, J, k, 'B', 'leg'));
 
-  // ---- color pass: back limbs ----
-  ctx.strokeStyle = back;
-  ctx.lineWidth = lw;
-  ctx.beginPath();
-  seg(ctx, J.neckX, J.neckY, J.elbowBX, J.elbowBY);
-  ctx.lineTo(J.handBX, J.handBY);
-  seg(ctx, J.hipX, J.hipY, J.kneeBX, J.kneeBY);
-  ctx.lineTo(J.footBX, J.footBY);
-  ctx.stroke();
-
-  // torso
-  ctx.strokeStyle = col;
-  ctx.lineWidth = lw + 2 * s;
-  ctx.beginPath();
-  seg(ctx, J.hipX, J.hipY, J.neckTopX, J.neckTopY);
-  ctx.stroke();
-
-  // front leg
-  ctx.lineWidth = lw;
-  ctx.beginPath();
-  seg(ctx, J.hipX, J.hipY, J.kneeFX, J.kneeFY);
-  ctx.lineTo(J.footFX, J.footFY);
-  ctx.stroke();
-
-  // head
-  ctx.fillStyle = col;
-  ctx.beginPath();
-  ctx.arc(J.headX, J.headY, J.headR, 0, Math.PI * 2);
-  ctx.fill();
-
-
-  // eye
-  if (!look.flash && look.eye !== false) {
-    const f = J.facing;
-    const ang = (-(J.rot || 0) - (J.lean || 0) * 0.3) * (Math.PI / 180);
-    const ex = J.headX + f * Math.cos(ang) * J.headR * 0.45;
-    const ey = J.headY - 2 * s + Math.sin(ang) * f * J.headR * 0.2;
-    ctx.fillStyle = look.eyeColor || '#fff';
+  // ---- torso: tapered from waist to chest, thin neck
+  const ntx = J.neckTopX ?? J.neckX, nty = J.neckTopY ?? J.neckY;
+  bodyPart(
+    ctx, J, k,
+    () => {
+      capsulePath(ctx, J.hipX, J.hipY, J.neckX, J.neckY, R.waist * k, R.chest * k);
+      capsulePath(ctx, J.neckX, J.neckY, ntx, nty, R.neck * k, R.neck * k);
+    },
+    col, L,
+    () => tubeLight(ctx, J.hipX, J.hipY, J.neckX, J.neckY, R.waist * k, R.chest * k),
+  );
+  // belt / sash in the accent colour
+  if (look.belt !== false) {
+    const dx = J.neckX - J.hipX, dy = J.neckY - J.hipY;
+    const d = Math.hypot(dx, dy) || 1;
+    const ux = dx / d, uy = dy / d;
+    const bx = J.hipX + ux * 7 * k, by = J.hipY + uy * 7 * k;
+    const w = R.waist * k + 1.6 * k;
+    ctx.strokeStyle = acc;
+    ctx.lineWidth = 4.2 * k;
+    ctx.lineCap = 'butt';
     ctx.beginPath();
-    if (look.eyeShape === 'visor') {
-      ctx.fillRect(ex - 6 * s, ey - 2.2 * s, 10 * s, 4.4 * s);
-    } else {
-      ctx.ellipse(ex, ey, 2.6 * s, 3.6 * s, 0, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    ctx.moveTo(bx - uy * w, by + ux * w);
+    ctx.lineTo(bx + uy * w, by - ux * w);
+    ctx.stroke();
+    ctx.lineCap = 'round';
   }
+
+  // ---- front leg
+  bodyPart(ctx, J, k, () => limbPath(ctx, J, k, 'F', 'leg'), col, L, () => limbLights(ctx, J, k, 'F', 'leg'));
+
+  // ---- head
+  const r = J.headR;
+  ctx.beginPath();
+  ctx.arc(J.headX, J.headY, r, 0, TAU);
+  if (L.outline !== 'none') {
+    ctx.strokeStyle = ol;
+    ctx.lineWidth = 2.3 * k * 2;
+    ctx.stroke();
+  }
+  ctx.fillStyle = look.flat ? col : back;
+  ctx.fill();
+  if (!look.flat) {
+    // lit side of the head, then a small specular
+    ctx.save();
+    ctx.clip();
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(J.headX + LIGHT_X * r * 0.3, J.headY + LIGHT_Y * r * 0.3, r * 0.98, 0, TAU);
+    ctx.fill();
+    if (look.rim && !look.flash) {
+      ctx.strokeStyle = look.rim;
+      ctx.globalAlpha = L.alpha * 0.45;
+      ctx.lineWidth = 2.2 * s;
+      ctx.beginPath();
+      ctx.arc(J.headX, J.headY, r - 1.2 * s, -0.25, 1.15);
+      ctx.stroke();
+      ctx.globalAlpha = L.alpha;
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.32)';
+    ctx.beginPath();
+    ctx.ellipse(J.headX + LIGHT_X * r * 0.42, J.headY + LIGHT_Y * r * 0.42, r * 0.3, r * 0.2, -0.5, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+  if (!look.flash && look.eye !== false) drawFace(ctx, J, L);
 
   if (look.drawFront) look.drawFront(ctx, J, look);
 
   // front weapon goes between body and front arm for blades held in front
   if (weapon) drawWeapon(ctx, J, weapon, look, 1);
 
-  // front arm
-  ctx.strokeStyle = col;
-  ctx.lineWidth = lw;
-  ctx.beginPath();
-  seg(ctx, J.neckX, J.neckY, J.elbowFX, J.elbowFY);
-  ctx.lineTo(J.handFX, J.handFY);
-  ctx.stroke();
+  // ---- front arm
+  bodyPart(ctx, J, k, () => limbPath(ctx, J, k, 'F', 'arm'), col, L, () => limbLights(ctx, J, k, 'F', 'arm'));
+  if (!handGear) fistAt(ctx, J, k, 'F', L, acc);
 
-  // hands: fists / gauntlets / claws
-  const kind = weapon && weapon.kind;
-  if (kind === 'gauntlet' || kind === 'claw' || kind === 'cannon') {
+  // hands: gauntlets / claws / cannon
+  if (handGear) {
     const drawFist = (x, y, ex, ey, front) => {
       const a = Math.atan2(y - ey, x - ex);
       ctx.save();
@@ -616,36 +829,63 @@ export function drawStickman(ctx, J, look) {
       if (kind === 'gauntlet') {
         ctx.fillStyle = ol;
         ctx.beginPath();
-        ctx.arc(0, 0, 9 * s, 0, Math.PI * 2);
+        ctx.arc(0, 0, 9.5 * s, 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = look.flash ? '#fff' : front ? look.accent : shade(look.accent, -0.3);
         ctx.beginPath();
+        ctx.arc(0, 0, 7 * s, 0, Math.PI * 2);
+        ctx.fill();
+        if (!look.flash) {
+          ctx.fillStyle = 'rgba(255,255,255,0.4)';
+          ctx.beginPath();
+          ctx.arc(-1.5 * s, -2.5 * s, 2.6 * s, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (kind === 'claw') {
+        ctx.fillStyle = ol;
+        ctx.beginPath();
         ctx.arc(0, 0, 6.5 * s, 0, Math.PI * 2);
         ctx.fill();
-      } else if (kind === 'claw') {
+        ctx.fillStyle = look.flash ? '#fff' : front ? col : back;
+        ctx.beginPath();
+        ctx.arc(0, 0, 4.4 * s, 0, Math.PI * 2);
+        ctx.fill();
         ctx.strokeStyle = ol;
         ctx.lineWidth = 5 * s;
-        for (const k of [-1, 0, 1]) {
+        for (const q of [-1, 0, 1]) {
           ctx.beginPath();
-          ctx.moveTo(0, k * 4 * s);
-          ctx.lineTo(16 * s, k * 6 * s);
+          ctx.moveTo(2 * s, q * 4 * s);
+          ctx.quadraticCurveTo(12 * s, q * 6 * s, 18 * s, q * 7 * s + 3 * s);
           ctx.stroke();
         }
         ctx.strokeStyle = look.flash ? '#fff' : look.accent;
         ctx.lineWidth = 2.2 * s;
-        for (const k of [-1, 0, 1]) {
+        for (const q of [-1, 0, 1]) {
           ctx.beginPath();
-          ctx.moveTo(0, k * 4 * s);
-          ctx.lineTo(16 * s, k * 6 * s);
+          ctx.moveTo(2 * s, q * 4 * s);
+          ctx.quadraticCurveTo(12 * s, q * 6 * s, 18 * s, q * 7 * s + 3 * s);
           ctx.stroke();
         }
-      } else if (kind === 'cannon' && front) {
-        ctx.fillStyle = ol;
-        ctx.fillRect(-20 * s, -8 * s, 30 * s, 16 * s);
-        ctx.fillStyle = look.flash ? '#fff' : weapon.metal || '#aab4c0';
-        ctx.fillRect(-18 * s, -6 * s, 26 * s, 12 * s);
-        ctx.fillStyle = look.flash ? '#fff' : look.accent;
-        ctx.fillRect(6 * s, -4 * s, 4 * s, 8 * s);
+      } else if (kind === 'cannon') {
+        if (front) {
+          ctx.fillStyle = ol;
+          ctx.fillRect(-20 * s, -8 * s, 30 * s, 16 * s);
+          ctx.fillStyle = look.flash ? '#fff' : weapon.metal || '#aab4c0';
+          ctx.fillRect(-18 * s, -6 * s, 26 * s, 12 * s);
+          ctx.fillStyle = look.flash ? '#fff' : 'rgba(255,255,255,0.35)';
+          ctx.fillRect(-18 * s, -6 * s, 26 * s, 3 * s);
+          ctx.fillStyle = look.flash ? '#fff' : look.accent;
+          ctx.fillRect(6 * s, -4 * s, 4 * s, 8 * s);
+        } else {
+          ctx.fillStyle = ol;
+          ctx.beginPath();
+          ctx.arc(0, 0, 7 * s, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = look.flash ? '#fff' : accBack;
+          ctx.beginPath();
+          ctx.arc(0, 0, 4.8 * s, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
       ctx.restore();
     };
