@@ -213,10 +213,45 @@ function drawTile(ctx, b, t, y, scroll = 0, fill = null, smooth = true) {
   }
 }
 
+// Draw a pre-rendered image (left edge at layer x0, top at y) in vertical slices
+// of `sw` units, each offset by dy(x) and faded by alpha(x). Slices are blitted
+// 1:1 on whole device pixels, so this animates a big image almost for free.
+function drawSlices(ctx, s, x0, y, b, sw, dy, alpha) {
+  if (!s) return;
+  const m = ctx.getTransform();
+  if (m.b !== 0 || m.c !== 0 || m.a <= 0) return;
+  const ppu = s.c.width / s.w, spx = Math.max(1, Math.round(sw * ppu)), k = m.a / ppu;
+  const a0 = ctx.globalAlpha;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const from = Math.max(0, Math.floor((b.x0 - x0) * ppu / spx) * spx), to = Math.min(s.c.width, (b.x1 - x0) * ppu);
+  for (let px = from; px < to; px += spx) {
+    const x = x0 + px / ppu;
+    const a = alpha(x);
+    if (a <= 0.01) continue;
+    const w = Math.min(spx, s.c.width - px);
+    ctx.globalAlpha = a0 * a;
+    const X = Math.round(m.a * x + m.e), Y = Math.round(m.d * (y + dy(x)) + m.f);
+    if (Math.abs(k - 1) < 0.01) ctx.drawImage(s.c, px, 0, w, s.c.height, X, Y, w, s.c.height);
+    else ctx.drawImage(s.c, px, 0, w, s.c.height, X, Y, Math.round(m.a * (x + w / ppu) + m.e) - X, Math.round(s.c.height * k));
+  }
+  ctx.globalAlpha = a0;
+  ctx.setTransform(m);
+}
+
+// A copy of a sprite pre-scaled by sc (so it can still be blitted 1:1).
+function rescaleSprite(s, sc) {
+  const c = createCanvas(Math.max(1, Math.round(s.c.width * sc)), Math.max(1, Math.round(s.c.height * sc)));
+  if (!c) return s;
+  c.getContext('2d').drawImage(s.c, 0, 0, c.width, c.height);
+  return { c, w: s.w * sc, h: s.h * sc, ax: s.ax * sc, ay: s.ay * sc };
+}
+
 // Draw sprite instances (o = {s, x, y, sc}) repeated with a period across bounds.
 function drawInstances(ctx, b, list, period) {
   for (let i = 0; i < list.length; i++) {
-    const o = list[i], s = o.s;
+    const o = list[i];
+    if (o.s && o.sc && o.sc !== 1) { o.s = rescaleSprite(o.s, o.sc); o.sc = 1; }   // keep blits 1:1
+    const s = o.s;
     if (!s) continue;
     const sc = o.sc || 1;
     const left = s.ax * sc, right = (s.w - s.ax) * sc;
@@ -270,6 +305,33 @@ function softDot(ctx, x, y, r, a) {
   ctx.beginPath(); ctx.arc(x, y, r * 0.68, 0, TAU); ctx.fill();
   ctx.globalAlpha = a * 0.45;
   ctx.beginPath(); ctx.arc(x, y, r * 0.38, 0, TAU); ctx.fill();
+}
+// Fixed-radius glow pre-rendered at the cache resolution so it blits 1:1
+// (the shared 128px sprite must be rescaled on every draw, which is costly).
+function glowBlitSprite(S, rgb, r, kind = 0) {
+  const key = rgb + '|' + r + '|' + kind;
+  S.glows = S.glows || new Map();
+  let s = S.glows.get(key);
+  if (s === undefined) {
+    const src = glowSprite(rgb, kind);
+    s = src ? makeSprite(r * 2, r * 2, r, r, S.res, (g) => g.drawImage(src, -r, -r, r * 2, r * 2)) : null;
+    S.glows.set(key, s);
+  }
+  return s;
+}
+function drawGlowBlit(ctx, S, rgb, x, y, r, a, kind = 0) {
+  if (a <= 0.004) return;
+  const s = glowBlitSprite(S, rgb, r, kind);
+  if (!s) return;
+  ctx.globalAlpha = a > 1 ? 1 : a;
+  blit(ctx, s.c, x - r, y - r, s.w, s.h);
+}
+function softEllipse(ctx, x, y, rx, ry, a) {
+  if (a <= 0.004 || rx <= 0 || ry <= 0) return;
+  for (const [k, f] of [[1, 0.3], [0.68, 0.35], [0.38, 0.45]]) {
+    ctx.globalAlpha = a * f;
+    ctx.beginPath(); ctx.ellipse(x, y, rx * k, ry * k, 0, 0, TAU); ctx.fill();
+  }
 }
 // Stretched glow (ellipse).
 function drawGlowE(ctx, rgb, x, y, rx, ry, a = 1, kind = 0) {
@@ -413,6 +475,7 @@ function screenGrad(ctx, view, stops, op = 'source-over') {
 // Colour grade + vignette baked into one screen-sized image (rebuilt when the
 // view size or device scale changes) and blitted 1:1 every frame.
 function drawOverlay(ctx, S, view, grade, vig) {
+  if (!S.hi) return;   // low quality: skip the full-screen grade/vignette pass
   const m = ctx.getTransform();
   const ds = Math.hypot(m.a, m.b) || 1;
   const res = ds > 1.25 ? ds / 2 : ds;
@@ -2327,6 +2390,7 @@ IMPL.volcano = {
 // 4. Frozen Peak
 // ═════════════════════════════════════════════════════════════════════════
 
+const AUR_X0 = -1400, AUR_X1 = 1400, AUR_Y0 = -800, AUR_Y1 = -320;
 const GLAC_SKY = [[0, '#02040c'], [0.3, '#06102a'], [0.55, '#0b2142'], [0.75, '#143657'], [0.9, '#1f5470'], [1, '#2d7486']];
 
 // One stylised peak with a lit face, a shadowed face and a jagged snow cap.
@@ -2421,7 +2485,7 @@ function auroraSprite(top, mid) {
 IMPL.glacier = {
   build(S) {
     const R = S.rng, res = S.res;
-    S.stars = makeTile(2400, 780, S.softRes, (g, w, h) => {
+    const stars = makeTile(2400, 780, S.softRes, (g, w, h) => {
       for (let i = 0; i < 30; i++) {
         const x = (i / 30) * w, y = h * 0.25 + Math.sin((i / 30) * TAU) * 120;
         wrap(w, x, (xx) => {
@@ -2436,18 +2500,59 @@ IMPL.glacier = {
       }
     });
     S.tw = Array.from({ length: S.n(40) }, () => ({ x: S.frng.range(-1200, 1200), y: S.frng.range(-760, -300), s: S.frng.range(1.2, 2.4), ph: S.frng() * TAU, f: S.frng.range(1, 3) }));
-    S.aur = [auroraSprite('rgba(120,90,255,0.25)', 'rgba(60,255,160,0.55)'), auroraSprite('rgba(255,90,200,0.2)', 'rgba(60,240,200,0.45)')];
+    const aur = [auroraSprite('rgba(120,90,255,0.25)', 'rgba(60,255,160,0.55)'), auroraSprite('rgba(255,90,200,0.2)', 'rgba(60,240,200,0.45)')];
     S.ribbons = [
-      { y: -440, amp: 70, h: 260, f1: 0.0021, f2: 0.0053, s1: 0.13, s2: 0.21, a: 0.6, spr: 0, x0: -1300, x1: 800 },
-      { y: -380, amp: 50, h: 190, f1: 0.0027, f2: 0.0071, s1: -0.17, s2: 0.11, a: 0.5, spr: 1, x0: -300, x1: 1400 },
-      { y: -560, amp: 40, h: 160, f1: 0.0016, f2: 0.0049, s1: 0.09, s2: -0.15, a: 0.35, spr: 0, x0: -1400, x1: 1400 },
+      { y: -405, amp: 40, h: 230, f1: 0.0021, f2: 0.0053, a: 0.6, spr: 0, x0: -1300, x1: 800 },
+      { y: -375, amp: 28, h: 170, f1: 0.0027, f2: 0.0071, a: 0.5, spr: 1, x0: -300, x1: 1400 },
+      { y: -540, amp: 30, h: 140, f1: 0.0016, f2: 0.0049, a: 0.35, spr: 0, x0: -1400, x1: 1400 },
     ];
+    // Each aurora ribbon is pre-rendered once (curtain of vertical rays along a
+    // gentle curve) and animated by drawing it in 1:1 vertical slices with small
+    // per-slice offsets and brightness waves: cheap, but still alive.
+    S.aurora = makeSprite(AUR_X1 - AUR_X0, AUR_Y1 - AUR_Y0, -AUR_X0, -AUR_Y0, S.softRes, (g) => {
+      g.globalCompositeOperation = 'lighter';
+      for (const rb of S.ribbons) {
+        const spr = aur[rb.spr];
+        if (!spr) continue;
+        for (let x = rb.x0; x < rb.x1; x += 3) {
+          const e = Math.min(1, (x - rb.x0) / 300, (rb.x1 - x) / 300);
+          if (e <= 0) continue;
+          const yb = rb.y + Math.sin(x * rb.f1) * rb.amp + Math.sin(x * rb.f2) * rb.amp * 0.4;
+          const hh = rb.h * (0.7 + 0.18 * Math.sin(x * 0.011) + 0.12 * Math.sin(x * 0.047));
+          g.globalAlpha = rb.a * e * (0.6 + 0.4 * Math.sin(x * 0.09 + rb.y) ** 2);
+          g.drawImage(spr, x - 2, yb - hh, 7, hh * 1.1);
+        }
+      }
+    });
     const far = { lit: '#9cb6d2', shadow: '#55729a', snowLit: '#e6f0fa', snowShadow: '#9fb4d4', haze: '#2f6f86' };
-    S.mtnFar = makeTile(2400, 460, S.softRes, (g, w, h) => {
+    const mtnFar = makeTile(2400, 460, S.softRes, (g, w, h) => {
       const pk = [];
-      for (let i = 0; i < 9; i++) pk.push([(i + R()) * (w / 9), R.range(200, 430), R.range(220, 360)]);
+      for (let i = 0; i < 9; i++) pk.push([(i + R()) * (w / 9), R.range(170, 340), R.range(220, 360)]);
       pk.sort((a, b) => b[1] - a[1]);
       for (const [x, ph, hw] of pk) snowPeak(g, R, w, h, x, ph, hw, far);
+    });
+    S.pano = makePano(S, GLAC_SKY, 0.03, (g, w, top, bot) => {
+      panoTile(g, stars, -780, w, bot);
+      g.globalCompositeOperation = 'lighter';
+      drawGlow(g, '150,190,255', -400, -500, 150, 0.4);
+      g.globalCompositeOperation = 'source-over';
+      g.globalAlpha = 1;
+      g.save();
+      g.beginPath();
+      g.rect(-460, -560, 120, 120);
+      g.arc(-388, -509, 27, 0, TAU);
+      g.clip('evenodd');
+      g.fillStyle = '#eef4ff';
+      g.beginPath();
+      g.arc(-400, -500, 30, 0, TAU);
+      g.fill();
+      g.restore();
+      g.globalCompositeOperation = 'lighter';
+      g.globalAlpha = 0.35;
+      if (S.aurora) g.drawImage(S.aurora.c, AUR_X0, AUR_Y0, S.aurora.w, S.aurora.h);  // faint static base glow
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = 'source-over';
+      panoTile(g, mtnFar, -460, w, bot, '#2f6f86');
     });
     const mid = { lit: '#5d7fa6', shadow: '#2c4769', snowLit: '#cfe0f0', snowShadow: '#7b95ba', haze: '#21506a' };
     S.mtnMid = makeTile(2400, 380, S.softRes, (g, w, h) => {
@@ -2543,61 +2648,31 @@ IMPL.glacier = {
 
   back(ctx, S, cam, view) {
     const t = S.t;
-    drawSky(ctx, cam, view, GLAC_SKY, -780, 0);
-    let b = layer(ctx, cam, view, 0.02);
-    drawTile(ctx, b, S.stars, -780);
+    drawPano(ctx, cam, view, S.pano);
+    let b = layer(ctx, cam, view, 0.025);
     ctx.fillStyle = '#ffffff';
-    for (const s of S.tw) {
-      eachCopy(s.x, 2400, b.x0, b.x1, 4, (x) => {
-        ctx.globalAlpha = 0.25 + 0.75 * Math.max(0, Math.sin(t * s.f + s.ph));
-        ctx.fillRect(x - s.s / 2, s.y - s.s / 2, s.s, s.s);
+    for (const st of S.tw) {
+      eachCopy(st.x, 2400, b.x0, b.x1, 4, (x) => {
+        ctx.globalAlpha = 0.25 + 0.75 * Math.max(0, Math.sin(t * st.f + st.ph));
+        ctx.fillRect(x - st.s / 2, st.y - st.s / 2, st.s, st.s);
       });
     }
     ctx.globalAlpha = 1;
-    // crescent moon
-    ctx.globalCompositeOperation = 'lighter';
-    drawGlow(ctx, '150,190,255', -400, -500, 150, 0.4);
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(-460, -560, 120, 120);
-    ctx.arc(-388, -509, 27, 0, TAU);
-    ctx.clip('evenodd');
-    ctx.fillStyle = '#eef4ff';
-    ctx.beginPath();
-    ctx.arc(-400, -500, 30, 0, TAU);
-    ctx.fill();
-    ctx.restore();
     ctx.restore();
 
-    // Aurora ribbons (vertical gradient strips along animated curves)
-    b = layer(ctx, cam, view, 0.035);
+    // Aurora: one pre-rendered curtain image drawn in 1:1 slices with gentle
+    // offsets and travelling brightness (it sits above the far range, which is baked into the panorama)
+    b = layer(ctx, cam, view, 0.03);
     ctx.globalCompositeOperation = 'lighter';
-    const step = S.hi ? 9 : 16;
-    let aurI = 0;
-    for (const rb of S.ribbons) {
-      const spr = S.aur[rb.spr];
-      if (!spr) continue;
-      const xa = Math.max(b.x0, rb.x0), xb = Math.min(b.x1, rb.x1);
-      for (let x = Math.floor(xa / step) * step; x < xb; x += step) {
-        const e = Math.min(1, (x - rb.x0) / 300, (rb.x1 - x) / 300);
-        if (e <= 0) continue;
-        const y = rb.y + Math.sin(x * rb.f1 + t * rb.s1) * rb.amp + Math.sin(x * rb.f2 - t * rb.s2 * 2) * rb.amp * 0.4;
-        const hh = rb.h * (0.7 + 0.18 * Math.sin(x * 0.011 + t * 0.7) + 0.12 * Math.sin(x * 0.047 - t * 1.3));
-        const a = rb.a * e * (0.4 + 0.6 * Math.sin(x * 0.006 - t * 0.5 + rb.y) ** 2) * (0.85 + 0.15 * Math.sin(x * 0.09 + t * 2));
-        ctx.globalAlpha = a;
-        ctx.drawImage(spr, x - step * 0.5, y - hh, step * 2, hh * 1.1);
-        aurI += a;
-      }
+    if (S.hi) {
+      drawSlices(ctx, S.aurora, AUR_X0, AUR_Y0, b, 36, (x) => Math.sin(x * 0.004 + t * 0.5) * 7 + Math.sin(x * 0.011 - t * 0.8) * 3,
+        (x) => 0.35 + 0.65 * Math.sin(x * 0.005 - t * 0.45) ** 2);
+    } else if (S.aurora) {
+      ctx.globalAlpha = 0.55 + 0.25 * Math.sin(t * 0.6);
+      blit(ctx, S.aurora.c, AUR_X0, AUR_Y0, S.aurora.w, S.aurora.h);
     }
-    S.aurI = aurI;
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
-    ctx.restore();
-
-    b = layer(ctx, cam, view, 0.07);
-    drawTile(ctx, b, S.mtnFar, -460, 0, '#2f6f86');
     ctx.restore();
     b = layer(ctx, cam, view, 0.15);
     drawTile(ctx, b, S.mtnMid, -380, 0, '#21506a');
@@ -2610,7 +2685,7 @@ IMPL.glacier = {
     ctx.restore();
     // Snow drift just behind the fighting line
     b = layer(ctx, cam, view, 0.88);
-    ctx.fillStyle = lin(ctx, 0, -46, 0, 0, [[0, '#e8f3fb'], [0.5, '#b7d2e6'], [1, '#86a9c6']]);
+    ctx.fillStyle = '#b4cfe3';
     ctx.beginPath();
     ctx.moveTo(b.x0 - 10, b.y1 + 4);
     const x0 = Math.floor(b.x0 / 40) * 40;
@@ -2619,6 +2694,14 @@ IMPL.glacier = {
     }
     ctx.lineTo(b.x1 + 10, b.y1 + 4);
     ctx.fill();
+    ctx.strokeStyle = '#eef6fc';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    for (let x = x0 - 40; x <= b.x1 + 40; x += 40) {
+      const y = -16 - 14 * Math.sin(x * 0.0041) - 9 * Math.sin(x * 0.013 + 1.3) - 6 * Math.sin(x * 0.031);
+      if (x === x0 - 40) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
     ctx.restore();
     drawDotField(ctx, S.snow, cam, view, '#eef6ff', 0.75);
 
@@ -2626,6 +2709,7 @@ IMPL.glacier = {
     const F = floorView(cam, view);
     if (F.gy < view.h) {
       floorBase(ctx, F, [[0, '#b8d8ea'], [0.12, '#7aa8c8'], [0.5, '#3f6c94'], [1, '#1b355a']]);
+      if (S.hi) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(-PAD, F.gy, view.w + 2 * PAD, view.h - F.gy + PAD);
@@ -2638,10 +2722,13 @@ IMPL.glacier = {
       drawTile(ctx, bb, S.mtnMid, -380);
       ctx.restore();
       ctx.restore();
+      }
       ctx.globalAlpha = 1;
-      floorTexture(ctx, F, S.ice, 1);
+      if (S.hi) floorTexture(ctx, F, S.ice, 1);
       ctx.globalCompositeOperation = 'lighter';
-      drawGlowE(ctx, '80,255,180', view.w * 0.45, F.gy + 50 * F.z, view.w * 0.6, 90 * F.z, Math.min(0.3, (S.aurI || 0) * 0.004), 2);
+      ctx.globalAlpha = 0.8 + 0.2 * Math.sin(t * 0.5);
+      fillGrad(ctx, [[0, 'rgba(80,255,180,0.16)'], [0.5, 'rgba(80,255,180,0.08)'], [1, 'rgba(80,255,180,0)']], -PAD, F.gy, view.w + 2 * PAD, 110 * F.z);
+      ctx.globalAlpha = 1;
       // glints
       ctx.fillStyle = '#ffffff';
       for (const gl of S.glints) {
@@ -2705,48 +2792,106 @@ function bambooLeafPath(g, x, y, ang, len, wid) {
   g.quadraticCurveTo(x + dx * len * 0.45 - px * wid, y + dy * len * 0.45 - py * wid, x, y);
 }
 
-// One bamboo stalk sprite (anchored at its base) with nodes, side branches and leaf sprays.
-function bambooStalk(res, R, H, wid, col, leafCol) {
-  const W = 260;
-  return makeSprite(W, H, W / 2, H, res, (g) => {
-    const hi = mix(col, '#ffffff', 0.25), lo = mix(col, '#000000', 0.3);
-    g.fillStyle = lin(g, -wid / 2, 0, wid / 2, 0, [[0, lo], [0.18, hi], [0.45, col], [1, lo]]);
-    g.beginPath();
-    g.moveTo(-wid / 2, 0); g.lineTo(-wid * 0.36, -H); g.lineTo(wid * 0.36, -H); g.lineTo(wid / 2, 0);
-    g.fill();
-    let y = -R.range(20, 60);
-    const leaves = [];
-    while (y > -H + 20) {
-      const ww = wid * (1 - (-y / H) * 0.28);
-      g.fillStyle = lo;
-      g.fillRect(-ww / 2 - 1.5, y - 1.5, ww + 3, 3);
-      g.fillStyle = rgba(hi, 0.6);
-      g.fillRect(-ww / 2, y + 1.5, ww, 1.5);
-      if (-y > H * 0.3 && R() < 0.55) {
-        const side = R() < 0.5 ? -1 : 1;
-        const bl = R.range(40, 100), ba = -Math.PI / 2 + side * R.range(0.6, 1.1);
-        const bx = side * ww * 0.45, ex = bx + Math.cos(ba) * bl, ey = y + Math.sin(ba) * bl;
-        g.strokeStyle = lo;
-        g.lineWidth = Math.max(1.2, wid * 0.08);
-        g.beginPath(); g.moveTo(bx, y); g.lineTo(ex, ey); g.stroke();
-        leaves.push([ex, ey, side], [bx + (ex - bx) * 0.55, y + (ey - y) * 0.55, side]);
-      }
-      y -= R.range(60, 100) * (wid / 22) * (1 + (-y / H) * 0.25);
-    }
+// Leaf cluster (short branch + a spray of lanceolate leaves), anchored at the
+// branch base on the stalk. side = +1 grows right, -1 left.
+function leafCluster(res, R, scale, leafCol, side) {
+  const W = 170 * scale, H = 125 * scale;
+  return makeSprite(W, H, side > 0 ? 8 * scale : W - 8 * scale, 80 * scale, res, (g) => {
+    const bl = R.range(40, 75) * scale, ba = -Math.PI / 2 + side * R.range(0.65, 1.05);
+    const ex = Math.cos(ba) * bl, ey = Math.sin(ba) * bl;
+    g.strokeStyle = mix(leafCol, '#000000', 0.3);
+    g.lineWidth = Math.max(1.2, 2.4 * scale);
+    g.beginPath(); g.moveTo(0, 0); g.lineTo(ex, ey); g.stroke();
+    const tips = [[ex, ey], [ex * 0.55, ey * 0.55]];
     const lc = [leafCol, mix(leafCol, '#ffffff', 0.18), mix(leafCol, '#000000', 0.2)];
     for (let c = 0; c < 3; c++) {
       g.fillStyle = lc[c];
       g.beginPath();
-      for (const [lx, ly, side] of leaves) {
+      for (const [lx, ly] of tips) {
         const n = R.int(1, 3);
         for (let i = 0; i < n; i++) {
-          const a = side > 0 ? R.range(0.15, 1.2) : Math.PI - R.range(0.15, 1.2);
-          bambooLeafPath(g, lx, ly, a, R.range(34, 62) * (wid / 22) ** 0.4, R.range(4, 7));
+          const a = side > 0 ? R.range(0.15, 1.15) : Math.PI - R.range(0.15, 1.15);
+          bambooLeafPath(g, lx, ly, a, R.range(36, 60) * scale, R.range(4, 7) * scale);
         }
       }
       g.fill();
     }
   });
+}
+
+// Stalk layout for one depth: positions, widths, node heights and leaf clusters.
+function bambooStalks(R, n, period, H, w0, w1, nVar) {
+  const list = [];
+  for (let i = 0; i < n; i++) {
+    const w = R.range(w0, w1), h = H * R.range(0.9, 1.1);
+    const o = { x: (i + R.range(0.1, 0.9)) * (period / n), w, h, ph: R() * TAU, nodes: [], cl: [] };
+    let y = -R.range(20, 60);
+    while (y > -h + 20) {
+      o.nodes.push(y);
+      if (-y > h * 0.3 && R() < 0.55) o.cl.push([y, R() < 0.5 ? -1 : 1, R.int(0, nVar - 1)]);
+      y -= R.range(60, 100) * (w / 22) * (1 + (-y / h) * 0.25);
+    }
+    list.push(o);
+  }
+  return list;
+}
+
+// Draw a layer of bamboo: vector stalk bodies (sheared by the sway, so the
+// base stays planted), node rings, then 1:1 leaf-cluster sprites that follow
+// the sway. k = 0 draws the layer statically (used when baking the far forest).
+function drawBamboo(g, b, L, t, amp, still = false) {
+  const ks = L.ks || (L.ks = new Float32Array(L.list.length));
+  for (let i = 0; i < L.list.length; i++) {
+    const o = L.list[i];
+    ks[i] = still ? 0 : (Math.sin(t * 0.55 + o.ph) * 0.014 + Math.sin(t * 1.4 + o.ph * 2.3) * 0.004) * amp;
+  }
+  const yTop = b.y0 - 140;
+  const pass = (style, f0, f1) => {
+    g.fillStyle = style;
+    g.beginPath();
+    for (let i = 0; i < L.list.length; i++) {
+      const o = L.list[i], k = ks[i], ht = Math.min(o.h, -yTop);
+      eachCopy(o.x, L.period, b.x0, b.x1, o.w + Math.abs(k) * o.h + 10, (x) => {
+        const wb = o.w / 2, wt = wb - (wb - o.w * 0.36) * (ht / o.h);
+        const ax = x - wb + o.w * f0, bx = x - wb + o.w * f1;
+        const tx0 = x - wt + 2 * wt * f0 - k * ht, tx1 = x - wt + 2 * wt * f1 - k * ht;
+        g.moveTo(ax, 0); g.lineTo(tx0, -ht); g.lineTo(tx1, -ht); g.lineTo(bx, 0); g.closePath();
+      });
+    }
+    g.fill();
+  };
+  pass(L.col, 0, 1);
+  pass(L.hi, 0.12, 0.34);
+  pass(L.lo, 0.68, 1);
+  g.strokeStyle = L.lo;
+  g.lineWidth = Math.max(1.5, L.list[0].w * 0.12);
+  g.beginPath();
+  for (let i = 0; i < L.list.length; i++) {
+    const o = L.list[i], k = ks[i];
+    eachCopy(o.x, L.period, b.x0, b.x1, o.w + Math.abs(k) * o.h + 10, (x) => {
+      for (const y of o.nodes) {
+        if (y < yTop) break;
+        const ww = o.w * (1 - (-y / o.h) * 0.28) * 0.5 + 1;
+        g.moveTo(x + k * y - ww, y); g.lineTo(x + k * y + ww, y);
+      }
+    });
+  }
+  g.stroke();
+  for (let i = 0; i < L.list.length; i++) {
+    const o = L.list[i], k = ks[i];
+    eachCopy(o.x, L.period, b.x0, b.x1, o.w + Math.abs(k) * o.h + 140, (x) => {
+      for (const [y, side, v] of o.cl) {
+        if (y < yTop) continue;
+        const ww = o.w * (1 - (-y / o.h) * 0.28) * 0.45;
+        drawSprite(g, L.spr[side > 0 ? 1 : 0][v], x + k * y + side * ww, y);
+      }
+    });
+  }
+}
+function bambooLayer(S, R, n, period, H, w0, w1, col, leafCol, scale) {
+  const nv = 4;
+  const spr = [-1, 1].map((side) => Array.from({ length: nv }, () => leafCluster(S.res, R, scale, leafCol, side)));
+  return { list: bambooStalks(R, n, period, H, w0, w1, nv), period, spr, col, hi: mix(col, '#ffffff', 0.22), lo: mix(col, '#000000', 0.28), ks: null };
 }
 
 function stoneLantern(res) {
@@ -2777,35 +2922,10 @@ function stoneLantern(res) {
   });
 }
 
-function stalkLayer(R, n, period, sprites) {
-  const list = [];
-  for (let i = 0; i < n; i++) {
-    list.push({ s: sprites[i % sprites.length], x: (i + R.range(0.1, 0.9)) * (period / n), fl: R() < 0.5 ? -1 : 1, sc: R.range(0.85, 1.1), ph: R() * TAU });
-  }
-  return list;
-}
-
-// Draw swaying stalks: per-stalk skew (x' = x + k*y) keeps the base planted.
-function drawStalks(ctx, b, list, period, t, amp) {
-  const m = ctx.getTransform();
-  for (const o of list) {
-    const s = o.s;
-    if (!s) continue;
-    const half = s.w * 0.5 * o.sc;
-    eachCopy(o.x, period, b.x0, b.x1, half + 60, (x) => {
-      const k = (Math.sin(t * 0.55 + o.ph) * 0.014 + Math.sin(t * 1.4 + o.ph * 2.3) * 0.004) * amp;
-      const sx = o.fl * o.sc, sc = o.sc;
-      ctx.setTransform(m.a * sx, m.b * sx, (m.a * k + m.c) * sc, (m.b * k + m.d) * sc, m.a * x + m.e, m.b * x + m.f);
-      ctx.drawImage(s.c, -s.ax, -s.ay, s.w, s.h);
-    });
-  }
-  ctx.setTransform(m);
-}
-
 IMPL.bamboo = {
   build(S) {
     const R = S.rng, res = S.res;
-    S.hills = makeTile(2400, 300, S.softRes, (g, w, h) => {
+    const hills = makeTile(2400, 300, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[4, 50], [11, 22], [31, 8]]);
       g.beginPath();
       g.moveTo(-8, h);
@@ -2814,13 +2934,35 @@ IMPL.bamboo = {
       g.fillStyle = lin(g, 0, h - 220, 0, h, [[0, '#9fbea0'], [1, '#d7e2bf']]);
       g.fill();
     });
-    const far = [0, 1, 2, 3].map(() => bambooStalk(S.softRes, R, 760, R.range(8, 12), '#a2bf9f', '#9ab996'));
-    const mid = [0, 1, 2, 3].map(() => bambooStalk(S.softRes, R, 900, R.range(14, 19), '#72a06c', '#6f9b66'));
-    const near = [0, 1, 2].map(() => bambooStalk(res, R, 1150, R.range(26, 34), '#3f6d40', '#3d6a3a'));
-    S.far = stalkLayer(R, 34, 2000, far);
-    S.mid = stalkLayer(R, 20, 2200, mid);
-    S.near = stalkLayer(R, 8, 2600, near).filter((o) => Math.abs(mod(o.x + 1300, 2600) - 1300) > 260);
+    const far = bambooLayer(S, R, 34, 2000, 760, 8, 12, '#a2bf9f', '#9ab996', 0.55);
+    S.mid = bambooLayer(S, R, 20, 2200, 900, 14, 19, '#72a06c', '#6f9b66', 0.75);
+    S.near = bambooLayer(S, R, 8, 2600, 1150, 26, 34, '#3f6d40', '#3d6a3a', 1.05);
+    S.near.list = S.near.list.filter((o) => Math.abs(mod(o.x + 1300, 2600) - 1300) > 260);
+    // Static panorama: sky + sun haze, misty hills, the far (motionless) forest,
+    // its mist band and the morning light shafts
+    S.pano = makePano(S, BAMBOO_SKY, 0.06, (g, w, top, bot) => {
+      g.globalCompositeOperation = 'lighter';
+      drawGlow(g, '255,240,190', -520, -620, 520, 0.5);
+      g.globalCompositeOperation = 'source-over';
+      g.globalAlpha = 1;
+      panoTile(g, hills, -300, w, bot, '#d7e2bf');
+      g.globalAlpha = 0.85;
+      drawBamboo(g, { x0: -w / 2, x1: w / 2, y0: top, y1: bot }, far, 0, 0, true);
+      g.globalAlpha = 1;
+      drawGlowE(g, '245,245,225', 0, -60, w / 2 + 200, 170, 0.55, 2);
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 6; i++) {
+        const x = -1000 + i * 380 + Math.sin(i * 7.1) * 80, wdt = 70 + (i % 3) * 45, a = 0.1;
+        g.fillStyle = lin(g, 0, -760, 0, 0, [[0, `rgba(255,245,200,${a * 1.6})`], [0.7, `rgba(255,240,190,${a})`], [1, 'rgba(255,240,190,0)']]);
+        g.beginPath();
+        g.moveTo(x, -780); g.lineTo(x + wdt, -780); g.lineTo(x + wdt + 420, 0); g.lineTo(x + 420 - wdt * 0.2, 0);
+        g.fill();
+      }
+      g.globalCompositeOperation = 'source-over';
+    });
     S.lantern = stoneLantern(res);
+    S.leafCols = ['#5f8f3e', '#8fb55e'];
     S.leafSpr = [0, 1].map((v) => makeSprite(26, 10, 13, 5, res, (g) => {
       g.fillStyle = v ? '#8fb55e' : '#5f8f3e';
       g.beginPath();
@@ -2901,56 +3043,23 @@ IMPL.bamboo = {
 
   back(ctx, S, cam, view) {
     const t = S.t;
-    drawSky(ctx, cam, view, BAMBOO_SKY, -780, 0);
-    let b = layer(ctx, cam, view, 0.03);
-    ctx.globalCompositeOperation = 'lighter';
-    drawGlow(ctx, '255,240,190', -520, -620, 520, 0.5);
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
-    ctx.restore();
-    b = layer(ctx, cam, view, 0.06);
-    drawTile(ctx, b, S.hills, -300, 0, '#d7e2bf');
-    ctx.restore();
+    drawPano(ctx, cam, view, S.pano);
     const amp = 1 + S.gust * 2.5;
-    b = layer(ctx, cam, view, 0.14);
-    ctx.globalAlpha = 0.85;
-    drawStalks(ctx, b, S.far, 2000, t, amp);
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
-    drawGlowE(ctx, '245,245,225', cam.x * 0.14, -60, 2200, 170, 0.55, 2);
-    ctx.globalAlpha = 1;
-    ctx.restore();
-    // Light shafts from the upper left
-    b = layer(ctx, cam, view, 0.25);
-    ctx.globalCompositeOperation = 'lighter';
-    for (let i = 0; i < 5; i++) {
-      const x = -900 + i * 330 + Math.sin(i * 7.1) * 80, wdt = 70 + (i % 3) * 45;
-      const a = 0.08 + 0.05 * Math.sin(t * 0.4 + i * 1.7);
-      eachCopy(x, 2000, b.x0 - 600, b.x1, 300, (xx) => {
-        ctx.fillStyle = lin(ctx, 0, -760, 0, 0, [[0, `rgba(255,245,200,${a * 1.6})`], [0.7, `rgba(255,240,190,${a})`], [1, 'rgba(255,240,190,0)']]);
-        ctx.beginPath();
-        ctx.moveTo(xx, -780); ctx.lineTo(xx + wdt, -780); ctx.lineTo(xx + wdt + 420, 0); ctx.lineTo(xx + 420 - wdt * 0.2, 0);
-        ctx.fill();
-      });
-    }
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.restore();
-    b = layer(ctx, cam, view, 0.32);
-    drawStalks(ctx, b, S.mid, 2200, t, amp);
-    drawGlowE(ctx, '240,244,220', cam.x * 0.32, -30, 2000, 120, 0.5, 2);
-    ctx.globalAlpha = 1;
+    let b = layer(ctx, cam, view, 0.32);
+    drawBamboo(ctx, b, S.mid, t, amp);
+    fillGrad(ctx, [[0, 'rgba(240,244,220,0)'], [0.55, 'rgba(240,244,220,0.42)'], [1, 'rgba(240,244,220,0.2)']], b.x0 - 4, -150, b.x1 - b.x0 + 8, 150);
     ctx.fillStyle = '#c9d6ad';
     ctx.fillRect(b.x0 - 4, 0, b.x1 - b.x0 + 8, b.y1 + 4);
     ctx.restore();
     b = layer(ctx, cam, view, 0.6);
-    drawStalks(ctx, b, S.near, 2600, t, amp * 1.2);
+    drawBamboo(ctx, b, S.near, t, amp * 1.2);
     ctx.restore();
     b = layer(ctx, cam, view, 0.75);
     for (const lx of [-560, 1500]) {
       eachCopy(lx, 3400, b.x0, b.x1, 80, (x) => {
         drawSprite(ctx, S.lantern, x, 0);
         ctx.globalCompositeOperation = 'lighter';
-        drawGlow(ctx, '255,200,110', x, -160, 70, 0.4 + 0.06 * Math.sin(t * 9 + x));
+        drawGlowBlit(ctx, S, '255,200,110', x, -160, 70, 0.4 + 0.06 * Math.sin(t * 9 + x));
         ctx.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = 1;
       });
@@ -2962,41 +3071,40 @@ IMPL.bamboo = {
       const a = Math.max(0, Math.sin(t * 1.1 + f.bl)) ** 2;
       if (a < 0.03) continue;
       eachCopy(x, 2600, b.x0, b.x1, 20, (xx) => {
-        drawGlow(ctx, '210,255,120', xx, y, 18, a * 0.7);
-        drawGlow(ctx, '255,255,210', xx, y, 4, a);
+        drawGlowBlit(ctx, S, '210,255,120', xx, y, 18, a * 0.7);
+        ctx.fillStyle = '#ffffd2';
+        ctx.globalAlpha = a;
+        ctx.beginPath(); ctx.arc(xx, y, 1.8, 0, TAU); ctx.fill();
       });
     }
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     ctx.restore();
     drawGlowField(ctx, S.motes, cam, view, '255,236,170', t, 1, 0.8);
-    drawSpriteField(ctx, S.leaves, cam, view, S.leafSpr, t, 1.5);
+    drawEllipseField(ctx, S.leaves, cam, view, S.leafCols, t, 1.5, 12, 3);
 
     // Floor: mossy flagstones
     const F = floorView(cam, view);
     if (F.gy < view.h) {
       floorBase(ctx, F, [[0, '#3a4532'], [0.3, '#283022'], [1, '#161c13']]);
-      const cols = ['#7f8670', '#6e7660', '#5d6e45'];
+      const cols = ['#868d76', '#747c66', '#62744a'];
       for (let gi = 0; gi < 3; gi++) {
-        ctx.fillStyle = lin(ctx, 0, F.gy, 0, F.gy + 240 * F.z, [[0, mix(cols[gi], '#fff6d0', 0.2)], [0.35, cols[gi]], [1, mix(cols[gi], '#1d241a', 0.55)]]);
+        ctx.fillStyle = cols[gi];
         ctx.beginPath();
         floorCopies(F, 1600, 0, 1700, (du) => {
           for (const pts of S.stones[gi]) if (pts[1] < F.rMax) floorPoly(ctx, F, pts, du);
         });
         ctx.fill();
       }
-      floorTexture(ctx, F, S.moss, 1);
-      ctx.globalCompositeOperation = 'lighter';
-      drawGlowE(ctx, '255,230,160', view.w * 0.55, F.gy + 30 * F.z, view.w * 0.6, 80 * F.z, 0.22, 2);
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = 1;
+      if (S.hi) floorTexture(ctx, F, S.moss, 1);
+      fillGrad(ctx, [[0, 'rgba(255,240,190,0.18)'], [0.3, 'rgba(30,40,24,0)'], [1, 'rgba(18,26,14,0.6)']], -PAD, F.gy, view.w + 2 * PAD, 240 * F.z, view.h + PAD);
       ctx.fillStyle = 'rgba(40,60,30,0.5)';
       ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 2);
     }
   },
 
   front(ctx, S, cam, view) {
-    drawSpriteField(ctx, S.leavesF, cam, view, S.leafSpr, S.t, 1.2);
+    drawEllipseField(ctx, S.leavesF, cam, view, S.leafCols, S.t, 1.2, 12, 3);
     // ferns hugging the bottom corners (subtle, low, slight parallax)
     if (S.ferns) {
       const z = 0.75 * (1 + (cam.zoom - 1) * 0.5);
@@ -3130,7 +3238,7 @@ function templeColumn(g, x, base, top, wdt, broken) {
 IMPL.temple = {
   build(S) {
     const R = S.rng, res = S.res;
-    S.cirrus = makeTile(2400, 320, S.softRes, (g, w) => {
+    const cirrus = makeTile(2400, 320, S.softRes, (g, w) => {
       for (let i = 0; i < 16; i++) {
         const x = R() * w, y = R.range(30, 280), cw = R.range(200, 500), ch = R.range(6, 14);
         wrap(w, x, (xx) => {
@@ -3139,8 +3247,57 @@ IMPL.temple = {
         });
       }
     });
-    S.seaFar = cloudBank(R, 2400, 260, S.softRes, { top: 150, n: 90, rMin: 40, rMax: 95, jitter: 40, shade: '#e3b7c6', base: '#c9a3c4', lit: 'rgba(255,240,220,0.95)', litFade: '#ffe9d6', seed: 11 });
+    const seaFar = cloudBank(R, 2400, 260, S.softRes, { top: 150, n: 90, rMin: 40, rMax: 95, jitter: 40, shade: '#e3b7c6', base: '#c9a3c4', lit: 'rgba(255,240,220,0.95)', litFade: '#ffe9d6', seed: 11 });
     S.seaMid = cloudBank(R, 2400, 220, S.softRes, { top: 110, n: 70, rMin: 45, rMax: 100, jitter: 30, shade: '#f2d2d6', base: '#dcb8cc', lit: 'rgba(255,250,240,0.95)', litFade: '#fff3e6', seed: 23 });
+    // Static panorama: sky, rising sun (glow + rays), high cirrus, far cloud sea
+    S.pano = makePano(S, TEMPLE_SKY, 0.05, (g, w, top, bot) => {
+      const sx = 470, sy = -90;
+      g.globalCompositeOperation = 'lighter';
+      drawGlow(g, '255,190,120', sx, sy, 700, 0.5);
+      drawGlow(g, '255,235,190', sx, sy, 240, 0.7);
+      g.globalAlpha = 1;
+      g.fillStyle = 'rgba(255,230,170,0.07)';
+      g.beginPath();
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * TAU + 0.05;
+        g.moveTo(sx, sy);
+        g.arc(sx, sy, 1100, a, a + 0.07 + (i % 3) * 0.03);
+      }
+      g.fill();
+      g.globalCompositeOperation = 'source-over';
+      g.fillStyle = rad(g, sx, sy, 10, 70, [[0, '#ffffff'], [0.7, '#fff3cf'], [1, '#ffe2a0']]);
+      g.beginPath(); g.arc(sx, sy, 66, 0, TAU); g.fill();
+      panoTile(g, cirrus, -720, w, bot, null, 200);
+      panoTile(g, seaFar, -260, w, bot, '#c9a3c4');
+    });
+    // Hazy sanctum facade, baked once
+    S.facade = makeSprite(700, 520, 350, 510, res, (g) => {
+      g.globalAlpha = 0.5;
+      g.fillStyle = '#efe2e4';
+      g.fillRect(-330, -50, 660, 50);
+      g.fillRect(-300, -76, 600, 28);
+      for (let i = 0; i < 6; i++) templeColumn(g, -250 + i * 100, -76, -330, 38, false);
+      g.globalAlpha = 0.5;
+      g.fillStyle = '#f3e8e6';
+      g.fillRect(-310, -386, 620, 40);
+      g.fillStyle = '#d9b36b';
+      g.fillRect(-310, -350, 620, 4);
+      g.fillStyle = '#efe0e0';
+      g.beginPath(); g.moveTo(-330, -386); g.lineTo(0, -490); g.lineTo(330, -386); g.fill();
+      g.fillStyle = 'rgba(217,179,107,0.9)';
+      g.beginPath(); g.arc(0, -425, 18, 0, TAU); g.fill();
+    });
+    // Colonnade pieces (instances)
+    const col = makeSprite(100, 600, 50, 600, res, (g) => templeColumn(g, 0, 0, -560, 54, false));
+    const broken = makeSprite(100, 400, 50, 400, res, (g) => templeColumn(g, 0, 0, -360, 54, true));
+    const beam = makeSprite(390, 44, 0, 44, res, (g) => {
+      g.fillStyle = lin(g, 0, -42, 0, -2, [[0, '#fbf4ea'], [1, '#d8c8b8']]);
+      g.fillRect(0, -42, 390, 40);
+      g.fillStyle = '#d4a94f';
+      g.fillRect(0, -6, 390, 3);
+    });
+    S.colonnade = [{ s: beam, x: -1345, y: -562 }, { s: beam, x: 955, y: -562 }];
+    for (const [cx, br] of [[-1300, 0], [-1000, 0], [-700, 1], [700, 1], [1000, 0], [1300, 0]]) S.colonnade.push({ s: br ? broken : col, x: cx, y: 0 });
     S.islands = [
       { s: floatingIsland(S.softRes, R, 180), x: -560, y: -360, p: 0.12, ph: 0 },
       { s: floatingIsland(S.softRes, R, 120), x: 700, y: -430, p: 0.1, ph: 2 },
@@ -3214,37 +3371,8 @@ IMPL.temple = {
 
   back(ctx, S, cam, view) {
     const t = S.t;
-    drawSky(ctx, cam, view, TEMPLE_SKY, -780, 0);
-    let b = layer(ctx, cam, view, 0.03);
-    const sx = 470, sy = -90;
-    ctx.globalCompositeOperation = 'lighter';
-    drawGlow(ctx, '255,190,120', sx, sy, 700, 0.5);
-    drawGlow(ctx, '255,235,190', sx, sy, 240, 0.7);
-    if (S.hi) {
-      ctx.save();
-      ctx.translate(sx, sy);
-      ctx.rotate(-t * 0.015);
-      ctx.fillStyle = 'rgba(255,230,170,0.07)';
-      ctx.beginPath();
-      for (let i = 0; i < 16; i++) {
-        const a = (i / 16) * TAU;
-        ctx.moveTo(0, 0);
-        ctx.arc(0, 0, 1100, a, a + 0.07 + (i % 3) * 0.03);
-      }
-      ctx.fill();
-      ctx.restore();
-    }
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = rad(ctx, sx, sy, 10, 70, [[0, '#ffffff'], [0.7, '#fff3cf'], [1, '#ffe2a0']]);
-    ctx.beginPath(); ctx.arc(sx, sy, 66, 0, TAU); ctx.fill();
-    ctx.restore();
-    b = layer(ctx, cam, view, 0.04);
-    drawTile(ctx, b, S.cirrus, -720, t * 5);
-    ctx.restore();
-    b = layer(ctx, cam, view, 0.07);
-    drawTile(ctx, b, S.seaFar, -260, t * 3, '#c9a3c4');
-    ctx.restore();
+    drawPano(ctx, cam, view, S.pano);
+    let b;
     // floating islands (bobbing)
     for (const isl of S.islands) {
       b = layer(ctx, cam, view, isl.p);
@@ -3269,42 +3397,13 @@ IMPL.temple = {
 
     // Distant sanctum facade (hazy, low contrast)
     b = layer(ctx, cam, view, 0.42);
-    eachCopy(-60, 3600, b.x0, b.x1, 420, (x) => {
-      ctx.globalAlpha = 0.5;
-      ctx.fillStyle = '#efe2e4';
-      ctx.fillRect(x - 330, -50, 660, 50);
-      ctx.fillRect(x - 300, -76, 600, 28);
-      for (let i = 0; i < 6; i++) templeColumn(ctx, x - 250 + i * 100, -76, -330, 38, false);
-      ctx.globalAlpha = 0.5;
-      ctx.fillStyle = '#f3e8e6';
-      ctx.fillRect(x - 310, -386, 620, 40);
-      ctx.fillStyle = '#d9b36b';
-      ctx.fillRect(x - 310, -350, 620, 4);
-      ctx.fillStyle = '#efe0e0';
-      ctx.beginPath(); ctx.moveTo(x - 330, -386); ctx.lineTo(x, -490); ctx.lineTo(x + 330, -386); ctx.fill();
-      ctx.fillStyle = 'rgba(217,179,107,0.9)';
-      ctx.beginPath(); ctx.arc(x, -425, 18, 0, TAU); ctx.fill();
-      ctx.globalAlpha = 1;
-    });
+    drawInstances(ctx, b, [{ s: S.facade, x: -60 }], 3600);
     ctx.fillStyle = '#e6d3d6';
     ctx.fillRect(b.x0 - 4, -2, b.x1 - b.x0 + 8, b.y1 + 6);
     ctx.restore();
     // Colonnade (some columns broken)
     b = layer(ctx, cam, view, 0.66);
-    ctx.fillStyle = '#f0e6da';
-    eachCopy(0, 2800, b.x0, b.x1, 1500, (x) => {
-      ctx.fillStyle = lin(ctx, 0, -600, 0, -560, [[0, '#fbf4ea'], [1, '#d8c8b8']]);
-      ctx.fillRect(x - 1345, -602, 390, 40);
-      ctx.fillRect(x + 955, -602, 390, 40);
-      ctx.fillStyle = '#d4a94f';
-      ctx.fillRect(x - 1345, -566, 390, 3);
-      ctx.fillRect(x + 955, -566, 390, 3);
-    });
-    eachCopy(0, 2800, b.x0, b.x1, 1500, (x) => {
-      for (const [cx, br] of [[-1300, 0], [-1000, 0], [-700, 1], [700, 1], [1000, 0], [1300, 0]]) {
-        templeColumn(ctx, x + cx, 0, br ? -360 : -560, 54, br);
-      }
-    });
+    drawInstances(ctx, b, S.colonnade, 2800);
     ctx.restore();
     drawGlowField(ctx, S.motes, cam, view, '255,220,140', t, 1, 0.8);
     // Balustrade + doves
@@ -3336,7 +3435,7 @@ IMPL.temple = {
     const F = floorView(cam, view);
     if (F.gy < view.h) {
       floorBase(ctx, F, [[0, '#f7eedf'], [0.2, '#e3d4c1'], [0.6, '#bba893'], [1, '#8a786a']]);
-      floorTexture(ctx, F, S.veins, 1);
+      if (S.hi) floorTexture(ctx, F, S.veins, 1);
       ctx.strokeStyle = 'rgba(150,120,95,0.38)';
       ctx.lineWidth = 1.2;
       ctx.beginPath();
@@ -3350,10 +3449,8 @@ IMPL.temple = {
       for (const r of [8, 12]) if (r < F.rMax) { ctx.moveTo(-PAD, fY(F, r)); ctx.lineTo(view.w + PAD, fY(F, r)); }
       ctx.stroke();
       ctx.globalCompositeOperation = 'lighter';
-      const [ssx] = layerToScreen(cam, view, 0.03, 470, -90);
-      drawGlowE(ctx, '255,200,140', ssx, F.gy + 20 * F.z, 600 * F.z, 120 * F.z, 0.35, 2);
+      fillGrad(ctx, [[0, 'rgba(255,200,140,0.22)'], [1, 'rgba(255,200,140,0)']], -PAD, F.gy, view.w + 2 * PAD, 90 * F.z);
       ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = 1;
       ctx.fillStyle = 'rgba(255,255,255,0.7)';
       ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5);
     }
@@ -3361,16 +3458,13 @@ IMPL.temple = {
 
   front(ctx, S, cam, view) {
     // low cloud wisps drifting along the bottom edge
-    const s = glowSprite('255,248,240', 1);
-    if (s) {
-      const W = view.w + 600;
-      for (const w of S.wisps) {
-        const x = mod(w.x - cam.x * 1.3, W) - 300;
-        ctx.globalAlpha = 0.33;
-        ctx.drawImage(s, x - w.s * 1.6, view.h - w.s * 0.45, w.s * 3.2, w.s * 0.9);
-      }
-      ctx.globalAlpha = 1;
+    const W = view.w + 600;
+    ctx.fillStyle = '#fff8f0';
+    for (const w of S.wisps) {
+      const x = mod(w.x - cam.x * 1.3, W) - 300;
+      softEllipse(ctx, x, view.h - w.s * 0.02, w.s * 1.5, w.s * 0.4, 0.32);
     }
+    ctx.globalAlpha = 1;
     drawOverlay(ctx, S, view, [[0, 'rgba(255,240,220,0.08)'], [0.5, 'rgba(255,230,200,0)'], [1, 'rgba(120,80,60,0.1)']], ['70,50,80', 0.35]);
   },
 
@@ -3478,14 +3572,14 @@ function fogTile(R, w, h, res, rgb) {
 IMPL.necropolis = {
   build(S) {
     const R = S.rng, res = S.res;
-    S.stars = makeTile(2400, 560, S.softRes, (g, w, h) => {
+    const stars = makeTile(2400, 560, S.softRes, (g, w, h) => {
       for (let i = 0; i < 300; i++) {
         const x = R() * w, y = Math.pow(R(), 1.6) * h;
         g.fillStyle = `rgba(220,235,255,${R.range(0.2, 0.7)})`;
         wrap(w, x, (xx) => g.fillRect(xx, y, R() < 0.9 ? 1.2 : 2, R() < 0.9 ? 1.2 : 2));
       }
     });
-    S.moon = makeSprite(300, 300, 150, 150, res, (g) => {
+    const moon = makeSprite(300, 300, 150, 150, res, (g) => {
       g.fillStyle = rad(g, -30, -30, 10, 125, [[0, '#fbf9e8'], [0.75, '#e8e5cc'], [1, '#cfcdb4']]);
       g.beginPath(); g.arc(0, 0, 120, 0, TAU); g.fill();
       g.save();
@@ -3508,7 +3602,7 @@ IMPL.necropolis = {
       g.fillRect(-120, -120, 240, 240);
       g.restore();
     });
-    S.clouds = makeTile(2400, 420, S.softRes, (g, w) => {
+    const clouds = makeTile(2400, 420, S.softRes, (g, w) => {
       for (let i = 0; i < 12; i++) {
         const x = R() * w, y = R.range(60, 380), cw = R.range(220, 520), ch = R.range(12, 26);
         wrap(w, x, (xx) => {
@@ -3521,7 +3615,7 @@ IMPL.necropolis = {
         });
       }
     });
-    S.far = makeTile(2400, 460, S.softRes, (g, w, h) => {
+    const far = makeTile(2400, 460, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[4, 40], [12, 16], [40, 5]]);
       const hy = (x) => h - (110 + f(x / w));
       const col = '#111a29';
@@ -3549,6 +3643,19 @@ IMPL.necropolis = {
       });
       g.fillStyle = lin(g, 0, h - 120, 0, h, [[0, 'rgba(54,98,90,0)'], [1, 'rgba(54,98,90,0.6)']]);
       g.fillRect(-8, h - 120, w + 16, 120);
+    });
+    // Static panorama: sky, stars, moon + halo, passing clouds, far hill with cathedral
+    S.pano = makePano(S, NECRO_SKY, 0.04, (g, w, top, bot) => {
+      panoTile(g, stars, -780, w, bot);
+      const mx = 330, my = -430;
+      g.globalCompositeOperation = 'lighter';
+      drawGlow(g, '120,170,160', mx, my, 520, 0.35);
+      drawGlow(g, '220,240,220', mx, my, 210, 0.35);
+      g.globalCompositeOperation = 'source-over';
+      g.globalAlpha = 1;
+      if (moon) g.drawImage(moon.c, mx - moon.ax, my - moon.ay, moon.w, moon.h);
+      panoTile(g, clouds, -720, w, bot, null, 500);
+      panoTile(g, far, -460, w, bot, '#1f3a3c');
     });
     S.mid = makeTile(2400, 320, S.softRes, (g, w, h) => {
       const f = pfbm(R, [[5, 24], [17, 9]]);
@@ -3698,22 +3805,8 @@ IMPL.necropolis = {
 
   back(ctx, S, cam, view) {
     const t = S.t;
-    drawSky(ctx, cam, view, NECRO_SKY, -780, 0);
-    let b = layer(ctx, cam, view, 0.02);
-    drawTile(ctx, b, S.stars, -780);
-    ctx.restore();
-    b = layer(ctx, cam, view, 0.03);
-    const mx = 330, my = -430;
-    ctx.globalCompositeOperation = 'lighter';
-    drawGlow(ctx, '120,170,160', mx, my, 520, 0.35);
-    drawGlow(ctx, '220,240,220', mx, my, 210, 0.35);
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
-    drawSprite(ctx, S.moon, mx, my);
-    ctx.restore();
-    b = layer(ctx, cam, view, 0.05);
-    drawTile(ctx, b, S.clouds, -720, t * 6);
-    ctx.restore();
+    drawPano(ctx, cam, view, S.pano);
+    let b;
     // bats crossing the sky
     ctx.fillStyle = '#05070c';
     for (const bt of S.bats) {
@@ -3723,13 +3816,12 @@ IMPL.necropolis = {
       ctx.fill();
       ctx.restore();
     }
-    b = layer(ctx, cam, view, 0.1);
-    drawTile(ctx, b, S.far, -460, 0, '#1f3a3c');
-    ctx.restore();
     b = layer(ctx, cam, view, 0.22);
-    ctx.globalAlpha = 0.5;
-    drawTile(ctx, b, S.fog, -230, t * 8);
-    ctx.globalAlpha = 1;
+    if (S.hi) {
+      ctx.globalAlpha = 0.5;
+      drawTile(ctx, b, S.fog, -230, t * 8);
+      ctx.globalAlpha = 1;
+    }
     drawTile(ctx, b, S.mid, -320, 0, '#1e3436');
     ctx.restore();
     b = layer(ctx, cam, view, 0.34);
@@ -3744,9 +3836,11 @@ IMPL.necropolis = {
     ctx.restore();
     b = layer(ctx, cam, view, 0.62);
     drawTile(ctx, b, S.graves, -230, 0, '#141c22');
-    ctx.globalAlpha = 0.5;
-    drawTile(ctx, b, S.fog, -150, t * 15 + 300);
-    ctx.globalAlpha = 1;
+    if (S.hi) {
+      ctx.globalAlpha = 0.5;
+      drawTile(ctx, b, S.fog, -150, t * 15 + 300);
+      ctx.globalAlpha = 1;
+    }
     ctx.restore();
     // will-o'-wisps
     b = layer(ctx, cam, view, 0.85);
@@ -3755,12 +3849,16 @@ IMPL.necropolis = {
       const fl = 0.75 + 0.25 * Math.sin(t * 7 + w.ph);
       eachCopy(w.x, 2800, b.x0, b.x1, 60, (x) => {
         const dx = x - w.x;
+        ctx.fillStyle = '#5affaa';
         for (let i = 2; i < w.tr.length; i += 2) {
           const k = 1 - i / w.tr.length;
-          drawGlow(ctx, '90,255,170', w.tr[i] + dx, w.tr[i + 1], 10 * k + 3, 0.35 * k * fl);
+          ctx.globalAlpha = 0.3 * k * fl;
+          ctx.beginPath(); ctx.arc(w.tr[i] + dx, w.tr[i + 1], 5 * k + 1.5, 0, TAU); ctx.fill();
         }
-        drawGlow(ctx, '90,255,170', x, w.y, 46, 0.35 * fl);
-        drawGlow(ctx, '220,255,235', x, w.y, 9, 0.9 * fl);
+        drawGlowBlit(ctx, S, '90,255,170', x, w.y, 46, 0.62 * fl);
+        ctx.fillStyle = '#dcffeb';
+        ctx.globalAlpha = 0.9 * fl;
+        ctx.beginPath(); ctx.arc(x, w.y, 4.5, 0, TAU); ctx.fill();
       });
     }
     ctx.globalCompositeOperation = 'source-over';
@@ -3770,29 +3868,24 @@ IMPL.necropolis = {
     // Floor: sunken flagstones and damp earth
     const F = floorView(cam, view);
     if (F.gy < view.h) {
-      floorBase(ctx, F, [[0, '#26333a'], [0.25, '#161f25'], [1, '#080b0e']]);
-      const cols = ['#323e44', '#2a3539'];
+      floorBase(ctx, F, [[0, '#3a4a4e'], [0.2, '#1f292d'], [0.6, '#11171a'], [1, '#07090b']]);
+      const cols = ['rgba(150,195,188,0.16)', 'rgba(150,195,188,0.09)'];
       for (let gi = 0; gi < 2; gi++) {
-        ctx.fillStyle = lin(ctx, 0, F.gy, 0, F.gy + 240 * F.z, [[0, mix(cols[gi], '#9fc7bf', 0.25)], [0.4, cols[gi]], [1, '#0d1215']]);
+        ctx.fillStyle = cols[gi];
         ctx.beginPath();
         floorCopies(F, 1600, 0, 1700, (du) => {
           for (const pts of S.stones[gi]) if (pts[1] < F.rMax) floorPoly(ctx, F, pts, du);
         });
         ctx.fill();
       }
-      floorTexture(ctx, F, S.flag, 1);
-      ctx.globalCompositeOperation = 'lighter';
-      const [msx] = layerToScreen(cam, view, 0.03, 330, -430);
-      drawGlowE(ctx, '140,190,180', msx, F.gy + 30 * F.z, 520 * F.z, 90 * F.z, 0.22, 2);
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = 1;
+      if (S.hi) floorTexture(ctx, F, S.flag, 1);
       ctx.fillStyle = 'rgba(160,210,200,0.25)';
       ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5);
     }
   },
 
   front(ctx, S, cam, view) {
-    const b = layer(ctx, cam, view, 1.25);
+    const b = layer(ctx, cam, view, 0.69);   // front fog (no zoom scaling: cheap 1:1 blit)
     ctx.globalAlpha = 0.2;
     drawTile(ctx, b, S.fog, -90, S.t * 22);
     ctx.globalAlpha = 1;
@@ -3834,39 +3927,45 @@ IMPL.necropolis = {
 
 const FOUNDRY_SKY = [[0, '#0a0807'], [0.3, '#140e0c'], [0.6, '#22160f'], [0.85, '#3a2314'], [1, '#583118']];
 
-function gearSprite(res, r, teeth, col) {
-  const R0 = r + 14;
+// Vector gear (rotating geometry is cheap to fill; a rotated bitmap is not).
+function drawGearVec(g, x, y, r, teeth, ang, col, hole) {
+  const td = 12;
+  g.fillStyle = col;
+  g.beginPath();
+  for (let i = 0; i < teeth; i++) {
+    const a0 = ang + (i / teeth) * TAU, a1 = ang + ((i + 0.22) / teeth) * TAU, a2 = ang + ((i + 0.5) / teeth) * TAU, a3 = ang + ((i + 0.72) / teeth) * TAU;
+    g.lineTo(x + Math.cos(a0) * r, y + Math.sin(a0) * r);
+    g.lineTo(x + Math.cos(a1) * (r + td), y + Math.sin(a1) * (r + td));
+    g.lineTo(x + Math.cos(a2) * (r + td), y + Math.sin(a2) * (r + td));
+    g.lineTo(x + Math.cos(a3) * r, y + Math.sin(a3) * r);
+  }
+  g.closePath();
+  g.fill();
+  g.fillStyle = hole;
+  g.beginPath();
+  const holes = teeth > 14 ? 6 : 5;
+  for (let i = 0; i < holes; i++) {
+    const a = ang + (i / holes) * TAU, hx = x + Math.cos(a) * r * 0.55, hy = y + Math.sin(a) * r * 0.55;
+    g.moveTo(hx + r * 0.22, hy);
+    g.arc(hx, hy, r * 0.22, 0, TAU);
+  }
+  g.fill();
+}
+// Non-rotating light on a gear: rim highlight + warm glow from below (baked once).
+function gearLight(res, r) {
+  const R0 = r + 16;
   return makeSprite(R0 * 2, R0 * 2, R0, R0, res, (g) => {
-    const td = 12, n = teeth;
-    g.beginPath();
-    for (let i = 0; i < n; i++) {
-      const a0 = (i / n) * TAU, a1 = ((i + 0.22) / n) * TAU, a2 = ((i + 0.5) / n) * TAU, a3 = ((i + 0.72) / n) * TAU;
-      g.lineTo(Math.cos(a0) * r, Math.sin(a0) * r);
-      g.lineTo(Math.cos(a1) * (r + td), Math.sin(a1) * (r + td));
-      g.lineTo(Math.cos(a2) * (r + td), Math.sin(a2) * (r + td));
-      g.lineTo(Math.cos(a3) * r, Math.sin(a3) * r);
-    }
-    g.closePath();
-    g.fillStyle = rad(g, 0, 0, r * 0.2, r + td, [[0, mix(col, '#000000', 0.2)], [0.75, col], [0.92, mix(col, '#ffffff', 0.15)], [1, mix(col, '#000000', 0.3)]]);
-    g.fill();
-    g.globalCompositeOperation = 'destination-out';
-    const holes = teeth > 14 ? 6 : 5;
-    for (let i = 0; i < holes; i++) {
-      const a = (i / holes) * TAU;
-      g.beginPath();
-      g.arc(Math.cos(a) * r * 0.55, Math.sin(a) * r * 0.55, r * 0.22, 0, TAU);
-      g.fill();
-    }
-    g.globalCompositeOperation = 'source-over';
     g.strokeStyle = 'rgba(0,0,0,0.45)';
     g.lineWidth = 3;
     g.beginPath(); g.arc(0, 0, r * 0.84, 0, TAU); g.stroke();
-    g.fillStyle = mix(col, '#ffffff', 0.12);
+    g.fillStyle = rad(g, 0, r * 0.75, 0, R0 * 1.1, [[0, 'rgba(255,120,50,0.28)'], [0.6, 'rgba(255,110,40,0.08)'], [1, 'rgba(255,110,40,0)']]);
+    g.fillRect(-R0, -R0, R0 * 2, R0 * 2);
+    g.fillStyle = rad(g, -r * 0.4, -r * 0.5, 0, r * 1.2, [[0, 'rgba(255,255,255,0.1)'], [1, 'rgba(255,255,255,0)']]);
+    g.beginPath(); g.arc(0, 0, r + 12, 0, TAU); g.fill();
+    g.fillStyle = '#4a3c35';
     g.beginPath(); g.arc(0, 0, r * 0.2, 0, TAU); g.fill();
     g.fillStyle = '#120c0a';
     g.beginPath(); g.arc(0, 0, r * 0.08, 0, TAU); g.fill();
-    g.fillStyle = 'rgba(255,255,255,0.12)';
-    for (let i = 0; i < 6; i++) { const a = (i / 6) * TAU; g.beginPath(); g.arc(Math.cos(a) * r * 0.14, Math.sin(a) * r * 0.14, 2.5, 0, TAU); g.fill(); }
   });
 }
 
@@ -3874,7 +3973,7 @@ IMPL.foundry = {
   build(S) {
     const R = S.rng, res = S.res;
     // Far wall: steel frame, tall cold windows
-    S.wall = makeTile(2400, 760, S.softRes, (g, w, h) => {
+    const wall = makeTile(2400, 760, S.softRes, (g, w, h) => {
       g.fillStyle = '#16100d';
       g.fillRect(-8, 0, w + 16, h);
       for (let i = 0; i < 4; i++) {
@@ -3907,13 +4006,36 @@ IMPL.foundry = {
       g.fillStyle = lin(g, 0, h - 320, 0, h, [[0, 'rgba(90,50,24,0)'], [1, 'rgba(90,50,24,0.9)']]);
       g.fillRect(-8, h - 320, w + 16, 320);
     });
+    S.pano = makePano(S, FOUNDRY_SKY, 0.08, (g, w, top, bot) => {
+      panoTile(g, wall, -760, w, bot, '#5a3218');
+      g.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 4; i++) {
+        for (const x of [(i + 0.5) * 600 - 2400, (i + 0.5) * 600]) {
+          g.fillStyle = lin(g, 0, -560, 0, 0, [[0, 'rgba(120,160,220,0.13)'], [1, 'rgba(120,160,220,0)']]);
+          g.beginPath();
+          g.moveTo(x - 90, -560); g.lineTo(x + 90, -560); g.lineTo(x + 420, 0); g.lineTo(x + 120, 0);
+          g.fill();
+        }
+      }
+      g.globalCompositeOperation = 'source-over';
+    }, -820, 0);
     S.gears = [
-      { s: gearSprite(S.softRes, 170, 18, '#3a302b'), x: -560, y: -440, w: 0.22, p: 0.2 },
-      { s: gearSprite(S.softRes, 104, 11, '#3f3430'), x: -322, y: -300, w: -0.36, p: 0.2, a0: 0.15 },
-      { s: gearSprite(S.softRes, 210, 22, '#352c28'), x: 760, y: -420, w: -0.15, p: 0.2 },
-      { s: gearSprite(res, 120, 13, '#2e2622'), x: -1020, y: -560, w: 0.3, p: 0.34 },
-      { s: gearSprite(res, 150, 16, '#2e2622'), x: 1150, y: -600, w: -0.24, p: 0.34 },
+      { r: 170, n: 18, col: '#3a302b', x: -560, y: -440, w: 0.22, p: 0.2 },
+      { r: 104, n: 11, col: '#3f3430', x: -322, y: -300, w: -0.36, p: 0.2, a0: 0.15 },
+      { r: 210, n: 22, col: '#352c28', x: 760, y: -420, w: -0.15, p: 0.2 },
+      { r: 120, n: 13, col: '#2e2622', x: -1020, y: -560, w: 0.3, p: 0.34 },
+      { r: 150, n: 16, col: '#2e2622', x: 1150, y: -600, w: -0.24, p: 0.34 },
     ];
+    for (const gr of S.gears) gr.light = gearLight(res, gr.r);
+    // pre-rendered lamp cone + bulb, ladle glow and pour splash glow
+    S.cone = makeSprite(360, 330, 180, 30, res, (g) => {
+      g.fillStyle = lin(g, 0, 0, 0, 300, [[0, 'rgba(255,200,120,0.17)'], [1, 'rgba(255,200,120,0)']]);
+      g.beginPath(); g.moveTo(-12, 0); g.lineTo(12, 0); g.lineTo(170, 296); g.lineTo(-170, 296); g.fill();
+      g.globalCompositeOperation = 'lighter';
+      drawGlow(g, '255,210,140', 0, 0, 30, 0.8);
+    });
+    S.ladleGlow = makeSprite(260, 480, 130, 240, res, (g) => drawGlowE(g, '255,120,30', 0, 0, 120, 230, 0.45, 1));
+    S.splash = makeSprite(340, 100, 170, 50, res, (g) => drawGlowE(g, '255,150,50', 0, 0, 160, 40, 0.7, 0));
     // Pipes with flanges, valves and gauges
     S.pipes = makeTile(2400, 620, S.softRes, (g, w, h) => {
       const pipe = (x0, y0, x1, y1, r) => {
@@ -4033,34 +4155,14 @@ IMPL.foundry = {
 
   back(ctx, S, cam, view) {
     const t = S.t;
-    drawSky(ctx, cam, view, FOUNDRY_SKY, -820, 0);
-    let b = layer(ctx, cam, view, 0.1);
-    drawTile(ctx, b, S.wall, -760, 0, '#5a3218');
-    // cold light shafts from the windows
-    ctx.globalCompositeOperation = 'lighter';
-    for (let i = 0; i < 4; i++) {
-      eachCopy((i + 0.5) * 600, 2400, b.x0 - 500, b.x1, 300, (x) => {
-        ctx.fillStyle = lin(ctx, 0, -560, 0, 0, [[0, 'rgba(120,160,220,0.13)'], [1, 'rgba(120,160,220,0)']]);
-        ctx.beginPath();
-        ctx.moveTo(x - 90, -560); ctx.lineTo(x + 90, -560); ctx.lineTo(x + 420, 0); ctx.lineTo(x + 120, 0);
-        ctx.fill();
-      });
-    }
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.restore();
-    // rotating gears with warm under-light
+    drawPano(ctx, cam, view, S.pano);
+    let b;
+    // rotating gears (vector) with fixed lighting overlays
     for (const gr of S.gears) {
       b = layer(ctx, cam, view, gr.p);
-      const m = ctx.getTransform();
-      eachCopy(gr.x, 3000, b.x0, b.x1, 260, (x) => {
-        if (!gr.s) return;
-        setLocal(ctx, m, x, gr.y, t * gr.w + (gr.a0 || 0), 1, 1);
-        ctx.drawImage(gr.s.c, -gr.s.ax, -gr.s.ay, gr.s.w, gr.s.h);
-        ctx.setTransform(m);
-        ctx.globalCompositeOperation = 'lighter';
-        drawGlowE(ctx, '255,110,40', x, gr.y + gr.s.ay * 0.7, gr.s.ax * 1.1, gr.s.ay * 0.5, 0.18, 2);
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.globalAlpha = 1;
+      eachCopy(gr.x, 3000, b.x0, b.x1, gr.r + 20, (x) => {
+        drawGearVec(ctx, x, gr.y, gr.r, gr.n, t * gr.w + (gr.a0 || 0), gr.col, '#1d1510');
+        drawSprite(ctx, gr.light, x, gr.y);
       });
       ctx.restore();
     }
@@ -4091,23 +4193,26 @@ IMPL.foundry = {
       ctx.restore();
       const lipX = x + Math.cos(tilt) * 80 - Math.sin(tilt) * -62, lipY = -340 + Math.sin(tilt) * 80 + Math.cos(tilt) * -62;
       ctx.globalCompositeOperation = 'lighter';
-      drawGlowE(ctx, '255,120,30', lipX, -170, 120, 230, 0.45 * S.flick, 1);
+      ctx.globalAlpha = S.flick;
+      drawSprite(ctx, S.ladleGlow, lipX, -170);
+      ctx.globalAlpha = 1;
       const wob = Math.sin(t * 13) * 2;
+      ctx.globalAlpha = 0.5;
       ctx.fillStyle = lin(ctx, 0, lipY, 0, 0, [[0, 'rgba(255,230,150,0.95)'], [1, 'rgba(255,140,40,0.9)']]);
       ctx.beginPath();
       ctx.moveTo(lipX - 3, lipY); ctx.quadraticCurveTo(lipX + 14, lipY + 40, lipX + 10 + wob, -60); ctx.lineTo(lipX + 22 + wob, 0); ctx.lineTo(lipX - 4 - wob, 0); ctx.quadraticCurveTo(lipX + 2, -80, lipX + 5, lipY + 30);
       ctx.fill();
-      drawGlowE(ctx, '255,150,50', lipX + 10, -10, 160, 40, 0.7 * S.flick, 0);
+      ctx.globalAlpha = S.flick;
+      drawSprite(ctx, S.splash, lipX + 10, -10);
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
     });
     // molten channel along the back
-    ctx.fillStyle = lin(ctx, 0, -18, 0, 0, [[0, '#ff9b3a'], [0.5, '#ffd27a'], [1, '#c2410f']]);
-    ctx.fillRect(b.x0 - 4, -16, b.x1 - b.x0 + 8, 16);
+    fillGrad(ctx, [[0, '#ff9b3a'], [0.5, '#ffd27a'], [1, '#c2410f']], b.x0 - 4, -16, b.x1 - b.x0 + 8, 16);
     ctx.fillStyle = '#120c0a';
     ctx.fillRect(b.x0 - 4, 0, b.x1 - b.x0 + 8, b.y1 + 4);
     ctx.globalCompositeOperation = 'lighter';
-    drawGlowE(ctx, '255,110,30', cam.x * 0.3, -10, (b.x1 - b.x0) * 0.7, 70, 0.4, 2);
+    fillGrad(ctx, [[0, 'rgba(255,110,30,0)'], [1, 'rgba(255,110,30,0.3)']], b.x0 - 4, -90, b.x1 - b.x0 + 8, 74);
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     ctx.restore();
@@ -4116,7 +4221,7 @@ IMPL.foundry = {
     drawTile(ctx, b, S.pipes, -620);
     for (const p of S.steam) {
       const a = Math.min(1, p.m * 3) * Math.min(1, p.life * 0.6) * 0.45;
-      drawGlow(ctx, '200,190,180', p.x, p.y, p.s, a, 1);
+      drawGlowBlit(ctx, S, '200,190,180', p.x, p.y, Math.max(8, Math.round(p.s / 8) * 8), a, 1);
     }
     ctx.globalAlpha = 1;
     ctx.restore();
@@ -4136,13 +4241,12 @@ IMPL.foundry = {
     eachCopy(-600, 1200, b.x0, b.x1, 30, (x) => ctx.fillRect(x - 12, -306, 24, 306));
     ctx.globalCompositeOperation = 'lighter';
     eachCopy(-300, 600, b.x0, b.x1, 400, (x) => {
-      const fl = S.flick * (0.92 + 0.08 * Math.sin(t * 50 + x));
-      ctx.fillStyle = lin(ctx, 0, -300, 0, 0, [[0, `rgba(255,200,120,${0.16 * fl})`], [1, 'rgba(255,200,120,0)']]);
-      ctx.beginPath(); ctx.moveTo(x - 12, -296); ctx.lineTo(x + 12, -296); ctx.lineTo(x + 170, 0); ctx.lineTo(x - 170, 0); ctx.fill();
-      drawGlow(ctx, '255,210,140', x, -296, 40, 0.8 * fl);
+      ctx.globalAlpha = S.flick * (0.92 + 0.08 * Math.sin(t * 50 + x));
+      drawSprite(ctx, S.cone, x, -296);
     });
+    ctx.globalAlpha = 1;
     // welding sparks
-    if (S.weld > 0) eachCopy(S.weldX, 3000, b.x0, b.x1, 60, (x) => drawGlow(ctx, '200,230,255', x, -326, 60 + Math.sin(t * 90) * 15, 0.8));
+    if (S.weld > 0) eachCopy(S.weldX, 3000, b.x0, b.x1, 60, (x) => drawGlowBlit(ctx, S, '200,230,255', x, -326, 64, 0.65 + Math.sin(t * 90) * 0.2));
     ctx.strokeStyle = 'rgba(255,220,140,0.9)';
     ctx.lineWidth = 1.6;
     ctx.beginPath();
@@ -4181,7 +4285,7 @@ IMPL.foundry = {
     // Floor: steel grate over a glowing pit
     const F = floorView(cam, view);
     if (F.gy < view.h) {
-      floorBase(ctx, F, [[0, '#7a3a14'], [0.2, '#55250d'], [0.6, '#2c1309'], [1, '#120806']]);
+      floorBase(ctx, F, [[0, '#7a3a14'], [0.2, '#50230c'], [0.6, '#241007'], [1, '#0c0504']]);
       ctx.strokeStyle = '#17110e';
       ctx.lineWidth = 3.4 * F.z;
       ctx.beginPath();
@@ -4196,13 +4300,11 @@ IMPL.foundry = {
       ctx.stroke();
       // solid diamond-plate edge strip at the back
       const y0 = F.gy, y1 = fY(F, 14);
-      ctx.fillStyle = lin(ctx, 0, y0, 0, y1, [[0, '#6a5a4e'], [0.3, '#3d322b'], [1, '#2a221d']]);
-      ctx.fillRect(-PAD, y0, view.w + 2 * PAD, y1 - y0);
-      floorTexture(ctx, F, S.grime, 1);
+      fillGrad(ctx, [[0, '#6a5a4e'], [0.3, '#3d322b'], [1, '#2a221d']], -PAD, y0, view.w + 2 * PAD, y1 - y0);
+      if (S.hi) floorTexture(ctx, F, S.grime, 1);
       ctx.fillStyle = 'rgba(255,190,120,0.45)';
       ctx.fillRect(-PAD, F.gy - 0.5, view.w + 2 * PAD, 1.5);
-      ctx.fillStyle = lin(ctx, 0, F.gy, 0, view.h, [[0, 'rgba(0,0,0,0)'], [1, 'rgba(0,0,0,0.3)']]);
-      ctx.fillRect(-PAD, F.gy, view.w + 2 * PAD, view.h - F.gy + PAD);
+
     }
   },
 
@@ -4230,6 +4332,7 @@ IMPL.foundry = {
 // 9. The Void
 // ═════════════════════════════════════════════════════════════════════════
 
+const VOID_P = 0.04, RIFT_Y = -410;
 const VOID_SKY = [[0, '#030108'], [0.4, '#0b0420'], [0.7, '#190837'], [0.9, '#290c49'], [1, '#381056']];
 
 // Unit polyhedra for the floating shards: [vertices, faces].
@@ -4280,8 +4383,14 @@ function drawShard(ctx, sh, x, y, s, t) {
     ctx.moveTo(P[i0], P[i0 + 1]); ctx.lineTo(P[i1], P[i1 + 1]); ctx.lineTo(P[i2], P[i2 + 1]);
     ctx.closePath();
     ctx.fill();
-    ctx.stroke();
   }
+  // edges of the nearer half of the faces, in one stroke
+  ctx.beginPath();
+  for (let n = idx.length >> 1; n < idx.length; n++) {
+    const f = Fc[order[idx[n]]];
+    ctx.moveTo(P[f[0] * 3], P[f[0] * 3 + 1]); ctx.lineTo(P[f[1] * 3], P[f[1] * 3 + 1]); ctx.lineTo(P[f[2] * 3], P[f[2] * 3 + 1]); ctx.closePath();
+  }
+  ctx.stroke();
 }
 const _shardOrder = [];
 const _shardBuf = new Float32Array(32);
@@ -4298,9 +4407,9 @@ IMPL.void = {
         });
       }
     };
-    S.neb1 = makeTile(2400, 820, S.softRes, (g, w, h) => blobs(g, w, h, 40, ['120,40,220', '60,30,180', '200,40,160'], 160, 380, 0.35));
-    S.neb2 = makeTile(2400, 820, S.softRes, (g, w, h) => blobs(g, w, h, 30, ['255,70,200', '60,190,255', '150,70,255'], 90, 240, 0.28));
-    S.stars = makeTile(2400, 820, S.softRes, (g, w, h) => {
+    const neb1 = makeTile(2400, 820, S.softRes, (g, w, h) => blobs(g, w, h, 40, ['120,40,220', '60,30,180', '200,40,160'], 160, 380, 0.35));
+    const neb2 = makeTile(2400, 820, S.softRes, (g, w, h) => blobs(g, w, h, 30, ['255,70,200', '60,190,255', '150,70,255'], 90, 240, 0.28));
+    const stars = makeTile(2400, 820, S.softRes, (g, w, h) => {
       for (let i = 0; i < 520; i++) {
         const x = R() * w, y = R() * h, s = R() < 0.9 ? R.range(0.6, 1.3) : R.range(1.6, 2.4);
         g.fillStyle = `rgba(${R.pick(['255,255,255', '220,200,255', '190,230,255'])},${R.range(0.3, 0.95)})`;
@@ -4308,17 +4417,31 @@ IMPL.void = {
       }
     });
     S.tw = Array.from({ length: S.n(36) }, () => ({ x: S.frng.range(-1200, 1200), y: S.frng.range(-800, -120), s: S.frng.range(1.4, 2.6), ph: S.frng() * TAU, f: S.frng.range(1, 3) }));
-    // accretion swirl around the rift
-    S.swirl = makeSprite(900, 900, 450, 450, S.softRes, (g) => {
-      for (let arm = 0; arm < 3; arm++) {
-        for (let i = 0; i < 160; i++) {
-          const k = i / 160, a = arm * (TAU / 3) + k * 5.2, r = 60 + k * 380;
-          const x = Math.cos(a) * r, y = Math.sin(a) * r * 0.55, rr = 14 + k * 46;
-          const c = k < 0.5 ? '200,120,255' : '120,90,255';
-          g.fillStyle = rad(g, x, y, 0, rr, [[0, `rgba(${c},${0.12 * (1 - k)})`], [1, `rgba(${c},0)`]]);
-          g.fillRect(x - rr, y - rr, rr * 2, rr * 2);
-        }
+    // Static panorama: nebulae, stars and the rift's base glow
+    S.pano = makePano(S, VOID_SKY, VOID_P, (g, w, top, bot) => {
+      g.globalCompositeOperation = 'lighter';
+      panoTile(g, neb1, -820, w, bot, null, 300);
+      g.globalCompositeOperation = 'source-over';
+      panoTile(g, stars, -820, w, bot);
+      g.globalCompositeOperation = 'lighter';
+      g.globalAlpha = 0.85;
+      panoTile(g, neb2, -820, w, bot, null, 900);
+      drawGlowE(g, '200,60,255', 0, RIFT_Y, 260, 360, 0.36);
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = 'source-over';
+    }, -820, 0);
+    // accretion swirl: soft blobs on three spiral arms, rotated live (positions only)
+    S.swirl = [];
+    for (let arm = 0; arm < 3; arm++) {
+      for (let i = 0; i < 20; i++) {
+        const k = i / 20;
+        S.swirl.push({ a: arm * (TAU / 3) + k * 5.2, r: 60 + k * 380, rr: Math.round((18 + k * 44) / 6) * 6, al: 0.3 * (1 - k * 0.6), c: k < 0.5 ? '210,130,255' : '130,95,255' });
       }
+    }
+    S.riftPulse = makeSprite(260, 540, 130, 270, res, (g) => drawGlowE(g, '255,90,200', 0, 0, 120, 260, 0.35));
+    S.riftRefl = makeSprite(260, 460, 130, 160, res, (g) => {
+      drawGlowE(g, '220,80,255', 0, 70, 120, 220, 0.5, 1);
+      drawGlowE(g, '255,140,80', 0, 50, 50, 120, 0.25, 1);
     });
     S.shards = [];
     const place = [
@@ -4342,6 +4465,10 @@ IMPL.void = {
           g.lineWidth = 1.5;
           g.beginPath(); g.moveTo(bx - bw, 0); g.lineTo(tx, -bh); g.lineTo(bx + bw, 0); g.moveTo(tx, -bh); g.lineTo(bx, 0); g.stroke();
         }
+        g.globalCompositeOperation = 'lighter';
+        drawGlowE(g, '150,90,255', 0, -60, 155, 115, 0.38, 1);
+        g.globalCompositeOperation = 'source-over';
+        g.globalAlpha = 1;
       }),
     }));
     // floor facet lattice rows
@@ -4380,13 +4507,8 @@ IMPL.void = {
 
   back(ctx, S, cam, view) {
     const t = S.t, e = S.eye;
-    drawSky(ctx, cam, view, VOID_SKY, -820, 0);
-    let b = layer(ctx, cam, view, 0.02);
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.8 + 0.2 * Math.sin(t * 0.3);
-    drawTile(ctx, b, S.neb1, -820, t * 3);
-    ctx.globalAlpha = 1;
-    drawTile(ctx, b, S.stars, -820);
+    drawPano(ctx, cam, view, S.pano);
+    let b = layer(ctx, cam, view, VOID_P);
     ctx.fillStyle = '#ffffff';
     for (const s of S.tw) {
       eachCopy(s.x, 2400, b.x0, b.x1, 4, (x) => {
@@ -4394,27 +4516,17 @@ IMPL.void = {
         ctx.fillRect(x - s.s / 2, s.y - s.s / 2, s.s, s.s);
       });
     }
-    ctx.restore();
-    b = layer(ctx, cam, view, 0.05);
-    ctx.globalAlpha = 0.75 + 0.25 * Math.sin(t * 0.21 + 1);
-    drawTile(ctx, b, S.neb2, -820, -t * 6);
-    ctx.globalAlpha = 1;
     // swirl + rift + eye
-    const rx = 0, ry = -410;
-    if (S.swirl) {
-      const m = ctx.getTransform();
-      ctx.globalAlpha = 0.85;
-      setLocal(ctx, m, rx, ry, t * 0.06, 1, 1);
-      ctx.drawImage(S.swirl.c, -S.swirl.ax, -S.swirl.ay, S.swirl.w, S.swirl.h);
-      if (S.hi) {
-        setLocal(ctx, m, rx, ry, -t * 0.035 + 1, 0.7, 0.7);
-        ctx.drawImage(S.swirl.c, -S.swirl.ax, -S.swirl.ay, S.swirl.w, S.swirl.h);
-      }
-      ctx.setTransform(m);
+    const rx = 0, ry = RIFT_Y;
+    ctx.globalCompositeOperation = 'lighter';
+    const rot = t * 0.06;
+    for (let i = 0; i < S.swirl.length; i += S.hi ? 1 : 2) {
+      const bl = S.swirl[i], a = bl.a + rot;
+      drawGlowBlit(ctx, S, bl.c, rx + Math.cos(a) * bl.r, ry + Math.sin(a) * bl.r * 0.55, bl.rr, bl.al * (S.hi ? 1 : 1.6), 2);
     }
     const fl = 0.8 + 0.2 * Math.sin(t * 2.3) + e.flare;
-    drawGlowE(ctx, '200,60,255', rx, ry, 260, 360, 0.45 * fl);
-    drawGlowE(ctx, '255,90,200', rx, ry, 120, 260, 0.35 * fl);
+    ctx.globalAlpha = Math.min(1, fl);
+    drawSprite(ctx, S.riftPulse, rx, ry);
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     const open = 1 - Math.sin(Math.min(1, e.blink) * Math.PI);
@@ -4435,7 +4547,7 @@ IMPL.void = {
       ctx.clip();
       const ix = rx + e.lx * W * 0.45, iy = ry + e.ly * 50;
       ctx.globalCompositeOperation = 'lighter';
-      drawGlow(ctx, '255,120,60', ix, iy, 120, 0.45 * fl);
+      drawGlowBlit(ctx, S, '255,120,60', ix, iy, 110, 0.45 * Math.min(1.4, fl));
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
       ctx.fillStyle = rad(ctx, ix, iy, 4, 44, [[0, '#ffe9a0'], [0.35, '#ffb02e'], [0.7, '#d2422a'], [1, '#5a0c3a']]);
@@ -4472,7 +4584,7 @@ IMPL.void = {
       eachCopy(sh.x, 3200, b.x0, b.x1, sh.s * 2, (x) => {
         const y = sh.y + Math.sin(t * 0.5 + sh.ph) * 14;
         ctx.globalCompositeOperation = 'lighter';
-        drawGlow(ctx, '170,90,255', x, y, sh.s * 3.2, 0.42);
+        if (S.hi) drawGlowBlit(ctx, S, '170,90,255', x, y, Math.round(sh.s * 2.3 / 8) * 8, 0.5);
         ctx.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = 1;
         drawShard(ctx, sh, x, y, sh.s, t);
@@ -4482,10 +4594,6 @@ IMPL.void = {
     drawGlowField(ctx, S.motes, cam, view, '190,130,255', t, 1, 0.85);
     b = layer(ctx, cam, view, 0.78);
     drawInstances(ctx, b, S.crystals, 3300);
-    ctx.globalCompositeOperation = 'lighter';
-    for (const c of S.crystals) eachCopy(c.x, 3300, b.x0, b.x1, 200, (x) => drawGlowE(ctx, '150,90,255', x, -60, 200, 120, 0.35 + 0.1 * Math.sin(t * 1.5 + x), 1));
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
     ctx.fillStyle = '#12061f';
     ctx.fillRect(b.x0 - 4, 0, b.x1 - b.x0 + 8, b.y1 + 4);
     ctx.restore();
@@ -4495,10 +4603,11 @@ IMPL.void = {
     if (F.gy < view.h) {
       floorBase(ctx, F, [[0, '#3a1660'], [0.15, '#1f0b40'], [0.6, '#0e0520'], [1, '#05020b']]);
       ctx.globalCompositeOperation = 'lighter';
-      const [rsx] = layerToScreen(cam, view, 0.05, 0, -400);
-      drawGlowE(ctx, '220,80,255', rsx, F.gy + 70 * F.z, 120 * F.z, 220 * F.z, 0.5 * fl, 1);
-      drawGlowE(ctx, '255,140,80', rsx, F.gy + 50 * F.z, 50 * F.z, 120 * F.z, 0.25 * fl, 1);
-      drawGlowE(ctx, '140,70,255', view.w / 2, F.gy, view.w * 0.7, 50 * F.z, 0.3, 2);
+      const [rsx] = layerToScreen(cam, view, VOID_P, 0, RIFT_Y);
+      ctx.globalAlpha = Math.min(1, fl);
+      drawSprite(ctx, S.riftRefl, rsx, F.gy);
+      ctx.globalAlpha = 1;
+      fillGrad(ctx, [[0, 'rgba(140,70,255,0.26)'], [1, 'rgba(140,70,255,0)']], -PAD, F.gy, view.w + 2 * PAD, 50 * F.z);
       const rows = S.rows;
       ctx.strokeStyle = 'rgba(170,110,255,0.42)';
       ctx.lineWidth = 1.3;
@@ -4906,6 +5015,7 @@ function buildArena(S, res) {
   S.rng = makeRng((hashStr(S.id) ^ Math.imul(S.seed | 0, 0x9e3779b1)) >>> 0);       // layout + runtime
   S.frng = makeRng((hashStr(S.id + ':fx') ^ Math.imul(S.seed | 0, 0x85ebca6b)) >>> 0); // quality-scaled particle setup
   S.ovKey = null;
+  S.glows = null;
   const bytes0 = _cacheBytes;
   try {
     IMPL[S.id].build(S);
